@@ -1,7 +1,9 @@
 import argparse
+import random
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+import numpy as np
 import torch
 import yaml
 
@@ -19,6 +21,8 @@ class Config:
     eval_iters: int = 20
     checkpoint_interval: int = 500
     learning_rate: float = 3e-4
+    seed: int = 42
+    grad_clip: float = 1.0
     data_path: Path = Path("data/tinyshakespeare.txt")
     tokenizer_path: Path = Path("tokenizers/tiny-bpe.json")
     tokenizer_vocab_size: int = 2048
@@ -74,6 +78,14 @@ def get_device():
     return device
 
 
+def set_seed(seed: int):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
 def config_to_dict(config):
     values = asdict(config)
     return {
@@ -123,6 +135,7 @@ def load_checkpoint(
 
 def train(config: Config):
     # prepare data
+    set_seed(config.seed)
     device = get_device()
     text = read_text(config.data_path)
     tokenizer = BPETokenizer(config.tokenizer_path)
@@ -184,6 +197,8 @@ def train(config: Config):
         logits, loss = model(x, y)
         optimizer.zero_grad(set_to_none=True)  # clear grad
         loss.backward()
+        if config.grad_clip > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
         optimizer.step()
 
         if (
