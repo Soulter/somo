@@ -12,7 +12,7 @@ from .train import get_device, load_config
 @dataclass
 class GenerateConfig:
     train_config_path: Path
-    prompt: str = "ROMEO:"
+    prompt: str = "the truth of the world is: "
     max_new_tokens: int = 500
     temperature: float = 0.8
 
