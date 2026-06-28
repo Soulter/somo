@@ -7,7 +7,7 @@ from tokenizers.pre_tokenizers import ByteLevel
 from tokenizers.decoders import ByteLevel as ByteLevelDecoder
 from tokenizers.trainers import BpeTrainer
 from datasets import load_dataset
-from src.somo.train import Config
+from somo.train import Config
 
 from somo.train import load_config
 
