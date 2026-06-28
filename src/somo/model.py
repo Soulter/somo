@@ -174,8 +174,8 @@ class GPT(nn.Module):
             # -1 mens calculate dimension automatically -> single -1 in a .view() at most!
             # or: RuntimeError: only one dimension can be inferred
             loss = F.cross_entropy(
-                logits.view(-1, logits.size(-1)),  # [B, T, V] -> [B*T, V]
-                targets.view(-1),
+                logits.reshape(-1, logits.size(-1)),  # [B, T, V] -> [B*T, V]
+                targets.reshape(-1),
             )
 
         return logits, loss

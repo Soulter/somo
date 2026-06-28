@@ -8,7 +8,13 @@ import numpy as np
 import torch
 import yaml
 
-from .data import StreamingTokenBatcher, get_batch, make_data, read_text
+from .data import (
+    JsonlTokenBatcher,
+    StreamingTokenBatcher,
+    get_batch,
+    make_data,
+    read_text,
+)
 from .tokenizers.bpe import BPETokenizer
 from .model import GPT, GPTConfig
 
@@ -165,6 +171,8 @@ def train(config: Config):
 
     print("vocab_size:", tokenizer.vocab_size)
 
+    is_streaming = config.data_source in {"hf", "jsonl"}
+
     if config.data_source == "local":
         text = read_text(config.data_path)
         train_data, val_data = make_data(text, tokenizer)
@@ -206,6 +214,30 @@ def train(config: Config):
             config.dataset_config,
             config.dataset_split,
         )
+    elif config.data_source == "jsonl":
+        train_data = None
+        val_data = None
+        train_batcher = JsonlTokenBatcher(
+            tokenizer=tokenizer,
+            batch_size=config.batch_size,
+            seq_len=config.seq_len,
+            device=device,
+            data_path=config.data_path,
+            text_column=config.text_column,
+            line_mod=10,
+            line_remainders=set(range(1, 10)),
+        )
+        eval_batcher = JsonlTokenBatcher(
+            tokenizer=tokenizer,
+            batch_size=config.batch_size,
+            seq_len=config.seq_len,
+            device=device,
+            data_path=config.data_path,
+            text_column=config.text_column,
+            line_mod=10,
+            line_remainders={0},
+        )
+        print("jsonl dataset:", config.data_path)
     else:
         raise ValueError(f"unknown data_source: {config.data_source}")
 
@@ -235,7 +267,7 @@ def train(config: Config):
     def estimate_loss():
         model.eval()
 
-        if config.data_source == "hf":
+        if is_streaming:
             losses = []
             for _ in range(config.eval_iters):
                 x, y = eval_batcher.next_batch()
@@ -273,7 +305,7 @@ def train(config: Config):
                 f"lr {lr:.2e}"
             )
 
-        if config.data_source == "hf":
+        if is_streaming:
             x, y = train_batcher.next_batch()
         else:
             x, y = get_batch(train_data, config.batch_size, config.seq_len, device)

@@ -1,4 +1,5 @@
 import argparse
+import json
 from pathlib import Path
 
 from tokenizers import Tokenizer
@@ -26,6 +27,24 @@ def parse_args():
 def iter_local_text(config):
     with open(config.data_path, "r", encoding="utf-8") as f:
         yield f.read()
+
+
+def iter_jsonl_text(config: Config):
+    count = 0
+    with open(config.data_path, "r", encoding="utf-8") as f:
+        for line in f:
+            if not line.strip():
+                continue
+
+            row = json.loads(line)
+            text = row.get(config.text_column)
+            if not text:
+                continue
+
+            yield text
+            count += 1
+            if count >= config.tokenizer_train_max_documents:
+                break
 
 
 def iter_hf_text(config: Config):
@@ -59,6 +78,8 @@ def iter_hf_text(config: Config):
 def get_text_iterator(config: Config):
     if config.data_source == "local":
         return iter_local_text(config), 1
+    if config.data_source == "jsonl":
+        return iter_jsonl_text(config), config.tokenizer_train_max_documents
     if config.data_source == "hf":
         return iter_hf_text(config), config.tokenizer_train_max_documents
 
