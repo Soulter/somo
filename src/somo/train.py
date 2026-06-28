@@ -1,4 +1,5 @@
 import argparse
+import math
 import random
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -21,6 +22,8 @@ class Config:
     eval_iters: int = 20
     checkpoint_interval: int = 500
     learning_rate: float = 3e-4
+    min_lr: float = 3e-5
+    warmup_steps: int = 100
     seed: int = 42
     grad_clip: float = 1.0
     data_path: Path = Path("data/tinyshakespeare.txt")
@@ -84,6 +87,20 @@ def set_seed(seed: int):
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+# dynamic lr
+def get_lr(step: int, config: Config) -> float:
+    if config.warmup_steps > 0 and step < config.warmup_steps:
+        return config.learning_rate * (step + 1) / config.warmup_steps
+
+    decay_steps = config.max_steps - config.warmup_steps
+    if decay_steps <= 0:
+        return config.min_lr
+
+    decay_step = min(step - config.warmup_steps, decay_steps)
+    decay_ratio = decay_step / decay_steps
+    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
+    return config.min_lr + coeff * (config.learning_rate - config.min_lr)
 
 
 def config_to_dict(config):
@@ -185,12 +202,17 @@ def train(config: Config):
         return out
 
     for step in range(start_step, config.max_steps):
+        lr = get_lr(step, config)
+        for param_group in optimizer.param_groups:
+            param_group["lr"] = lr
+
         if step % config.eval_interval == 0:
             losses = estimate_loss()
             print(
                 f"step {step}: "
                 f"train loss {losses['train']:.4f}, "
-                f"val loss {losses['val']:.4f}"
+                f"val loss {losses['val']:.4f}, "
+                f"lr {lr:.2e}"
             )
 
         x, y = get_batch(train_data, config.batch_size, config.seq_len, device)

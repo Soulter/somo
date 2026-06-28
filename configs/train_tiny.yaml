@@ -5,6 +5,8 @@ eval_interval: 100
 eval_iters: 20
 checkpoint_interval: 500
 learning_rate: 0.0003
+min_lr: 0.00003
+warmup_steps: 100
 seed: 42
 grad_clip: 1.0
 
