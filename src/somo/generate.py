@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import torch
 
-from .data import CharTokenizer, read_text
+from .tokenizers.bpe import BPETokenizer
 from .model import GPT, GPTConfig
 from .train import get_device, load_config
 
@@ -19,7 +19,7 @@ class GenerateConfig:
 
 def load_model(
     checkpoint_path: Path,
-    tokenizer: CharTokenizer,
+    tokenizer: BPETokenizer,
     device: str,
 ) -> GPT:
     if not checkpoint_path.exists():
@@ -47,8 +47,7 @@ def main(config: GenerateConfig):
     device = get_device()
     train_config = load_config(config.train_config_path)
 
-    text = read_text(train_config.data_path)
-    tokenizer = CharTokenizer(text)
+    tokenizer = BPETokenizer(train_config.tokenizer_path)
     model = load_model(train_config.checkpoint_path, tokenizer, device)
 
     prompt_ids = tokenizer.encode(config.prompt)

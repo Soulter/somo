@@ -5,7 +5,8 @@ from pathlib import Path
 import torch
 import yaml
 
-from .data import CharTokenizer, get_batch, make_data, read_text
+from .data import get_batch, make_data, read_text
+from .tokenizers.bpe import BPETokenizer
 from .model import GPT, GPTConfig
 
 
@@ -19,6 +20,8 @@ class Config:
     checkpoint_interval: int = 500
     learning_rate: float = 3e-4
     data_path: Path = Path("data/tinyshakespeare.txt")
+    tokenizer_path: Path = Path("tokenizers/tiny-bpe.json")
+    tokenizer_vocab_size: int = 2048
     checkpoint_path: Path = Path("checkpoints/tiny.pt")
     resume_path: Path | None = None
     n_layers: int = 4
@@ -43,6 +46,9 @@ def load_config(path: str | Path) -> Config:
         values = yaml.safe_load(f) or {}
 
     values["data_path"] = resolve_path(values.get("data_path", Config.data_path))
+    values["tokenizer_path"] = resolve_path(
+        values.get("tokenizer_path", Config.tokenizer_path)
+    )
     values["checkpoint_path"] = resolve_path(
         values.get("checkpoint_path", Config.checkpoint_path)
     )
@@ -119,7 +125,7 @@ def train(config: Config):
     # prepare data
     device = get_device()
     text = read_text(config.data_path)
-    tokenizer = CharTokenizer(text)
+    tokenizer = BPETokenizer(config.tokenizer_path)
     train_data, val_data = make_data(text, tokenizer)
 
     print("vocab_size:", tokenizer.vocab_size)

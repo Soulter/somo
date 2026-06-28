@@ -11,6 +11,7 @@ uv sync
 ## Run
 
 ```bash
+uv run python scripts/train_tokenizer.py --config configs/train_tiny.yaml
 uv run python -m somo.train --config configs/train_tiny.yaml
 uv run python -m somo.generate --config configs/train_tiny.yaml
 ```

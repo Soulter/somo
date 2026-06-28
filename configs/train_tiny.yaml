@@ -14,3 +14,6 @@ n_layers: 4
 n_heads: 4
 d_model: 256
 dropout: 0.0
+
+tokenizer_path: tokenizers/tiny-bpe.json
+tokenizer_vocab_size: 2048

@@ -1,5 +1,7 @@
 import torch
 from pathlib import Path
+from .tokenizers.tokenizer import BaseTokenizer
+from .tokenizers.bpe import BPETokenizer
 
 
 def read_text(path: str | Path) -> str:
@@ -7,22 +9,7 @@ def read_text(path: str | Path) -> str:
         return f.read()
 
 
-class CharTokenizer:
-    def __init__(self, text: str) -> None:
-        chars = sorted(set(text))
-        self.stoi = {ch: i for i, ch in enumerate(chars)}
-        self.itos = {i: ch for i, ch in enumerate(chars)}
-        self.vocab_size = len(chars)
-
-    def encode(self, text: str) -> list[int]:
-        return [self.stoi[ch] for ch in text]
-
-    def decode(self, ids: list[int]) -> str:
-        seq = [self.itos[i] for i in ids]
-        return "".join(seq)
-
-
-def make_data(text: str, tokenizer: CharTokenizer):
+def make_data(text: str, tokenizer: BaseTokenizer):
     ids = tokenizer.encode(text)
     data = torch.tensor(ids, dtype=torch.long)
 
@@ -47,7 +34,7 @@ def get_batch(data: torch.Tensor, batch_size: int, seq_len: int, device: str):
 
 if __name__ == "__main__":
     text = read_text("data/tinyshakespeare.txt")
-    tokenizer = CharTokenizer(text)
+    tokenizer = BPETokenizer(text)
     train_data, val_data = make_data(text, tokenizer)
 
     x, y = get_batch(
