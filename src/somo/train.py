@@ -5,8 +5,8 @@ from pathlib import Path
 import torch
 import yaml
 
-from data import CharTokenizer, get_batch, make_data, read_text
-from model import GPT, GPTConfig
+from .data import CharTokenizer, get_batch, make_data, read_text
+from .model import GPT, GPTConfig
 
 
 @dataclass
@@ -35,7 +35,7 @@ def resolve_path(value: str | Path | None) -> Path | None:
     if path.is_absolute():
         return path
 
-    return Path(__file__).resolve().parent / path
+    return path
 
 
 def load_config(path: str | Path) -> Config:
@@ -56,12 +56,13 @@ def parse_args():
     parser.add_argument(
         "--config",
         type=Path,
+        required=True,
         help="Path to the training YAML config.",
     )
     return parser.parse_args()
 
 
-def get_divice():
+def get_device():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     device = "mps" if torch.backends.mps.is_available() else device
     return device
@@ -116,7 +117,7 @@ def load_checkpoint(
 
 def train(config: Config):
     # prepare data
-    device = get_divice()
+    device = get_device()
     text = read_text(config.data_path)
     tokenizer = CharTokenizer(text)
     train_data, val_data = make_data(text, tokenizer)

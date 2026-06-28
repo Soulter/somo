@@ -4,9 +4,9 @@ from dataclasses import dataclass
 
 import torch
 
-from data import CharTokenizer, read_text
-from model import GPT, GPTConfig
-from train import get_divice, load_config
+from .data import CharTokenizer, read_text
+from .model import GPT, GPTConfig
+from .train import get_device, load_config
 
 
 @dataclass
@@ -44,7 +44,7 @@ def load_model(
 
 
 def main(config: GenerateConfig):
-    device = get_divice()
+    device = get_device()
     train_config = load_config(config.train_config_path)
 
     text = read_text(train_config.data_path)
@@ -68,6 +68,7 @@ def parse_args():
     parser.add_argument(
         "--config",
         type=Path,
+        required=True,
         help="Path to the training YAML config.",
     )
     return parser.parse_args()
