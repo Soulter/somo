@@ -8,7 +8,7 @@ import numpy as np
 import torch
 import yaml
 
-from .data import get_batch, make_data, read_text
+from .data import StreamingTokenBatcher, get_batch, make_data, read_text
 from .tokenizers.bpe import BPETokenizer
 from .model import GPT, GPTConfig
 
@@ -26,9 +26,16 @@ class Config:
     warmup_steps: int = 100
     seed: int = 42
     grad_clip: float = 1.0
+    data_source: str = "local"
     data_path: Path = Path("data/tinyshakespeare.txt")
+    dataset_name: str | None = None
+    dataset_config: str | None = None
+    dataset_split: str = "train"
+    text_column: str = "text"
+    shuffle_buffer_size: int = 10_000
     tokenizer_path: Path = Path("tokenizers/tiny-bpe.json")
     tokenizer_vocab_size: int = 2048
+    tokenizer_train_max_documents: int = 100_000
     checkpoint_path: Path = Path("checkpoints/tiny.pt")
     resume_path: Path | None = None
     n_layers: int = 4
@@ -154,13 +161,53 @@ def train(config: Config):
     # prepare data
     set_seed(config.seed)
     device = get_device()
-    text = read_text(config.data_path)
     tokenizer = BPETokenizer(config.tokenizer_path)
-    train_data, val_data = make_data(text, tokenizer)
 
     print("vocab_size:", tokenizer.vocab_size)
-    print("train tokens:", len(train_data))
-    print("val tokens:", len(val_data))
+
+    if config.data_source == "local":
+        text = read_text(config.data_path)
+        train_data, val_data = make_data(text, tokenizer)
+        train_batcher = None
+        print("train tokens:", len(train_data))
+        print("val tokens:", len(val_data))
+    elif config.data_source == "hf":
+        if config.dataset_name is None:
+            raise ValueError("dataset_name is required when data_source is 'hf'")
+        train_data = None
+        val_data = None
+        train_batcher = StreamingTokenBatcher(
+            tokenizer=tokenizer,
+            batch_size=config.batch_size,
+            seq_len=config.seq_len,
+            device=device,
+            dataset_name=config.dataset_name,
+            dataset_config=config.dataset_config,
+            dataset_split=config.dataset_split,
+            text_column=config.text_column,
+            shuffle_buffer_size=config.shuffle_buffer_size,
+            seed=config.seed,
+        )
+        eval_batcher = StreamingTokenBatcher(
+            tokenizer=tokenizer,
+            batch_size=config.batch_size,
+            seq_len=config.seq_len,
+            device=device,
+            dataset_name=config.dataset_name,
+            dataset_config=config.dataset_config,
+            dataset_split=config.dataset_split,
+            text_column=config.text_column,
+            shuffle_buffer_size=max(1, config.shuffle_buffer_size // 10),
+            seed=config.seed + 1,
+        )
+        print(
+            "hf dataset:",
+            config.dataset_name,
+            config.dataset_config,
+            config.dataset_split,
+        )
+    else:
+        raise ValueError(f"unknown data_source: {config.data_source}")
 
     # prepare model
     gpt_config = GPTConfig(
@@ -187,6 +234,17 @@ def train(config: Config):
     @torch.no_grad()
     def estimate_loss():
         model.eval()
+
+        if config.data_source == "hf":
+            losses = []
+            for _ in range(config.eval_iters):
+                x, y = eval_batcher.next_batch()
+                _, loss = model(x, y)
+                losses.append(loss.item())
+
+            mean_loss = sum(losses) / len(losses)
+            model.train()
+            return {"train": mean_loss, "val": mean_loss}
 
         out = {}
         for split, data in [("train", train_data), ("val", val_data)]:
@@ -215,7 +273,10 @@ def train(config: Config):
                 f"lr {lr:.2e}"
             )
 
-        x, y = get_batch(train_data, config.batch_size, config.seq_len, device)
+        if config.data_source == "hf":
+            x, y = train_batcher.next_batch()
+        else:
+            x, y = get_batch(train_data, config.batch_size, config.seq_len, device)
         logits, loss = model(x, y)
         optimizer.zero_grad(set_to_none=True)  # clear grad
         loss.backward()
