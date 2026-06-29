@@ -1,8 +1,10 @@
 import argparse
 import math
 import random
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from datetime import datetime
 
 import numpy as np
 import torch
@@ -51,7 +53,14 @@ class Config:
     dropout: float = 0.0
     grad_accum_steps: int = 1 # micro batch
     log_dir: Path | None = None
+    precision: str = "bf16"
 
+def get_autocast_context(device: str, precision: str):
+    if device == "cuda" and precision == "bf16":
+        return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+    if device == "cuda" and precision == "fp16":
+        return torch.autocast(device_type="cuda", dtype=torch.float16)
+    return nullcontext()
 
 def resolve_path(value: str | Path | None) -> Path | None:
     if value is None:
@@ -76,7 +85,9 @@ def load_config(path: str | Path) -> Config:
         values.get("checkpoint_path", Config.checkpoint_path)
     )
     values["resume_path"] = resolve_path(values.get("resume_path"))
-    values["log_dir"] = resolve_path(values.get("log_dir"))
+
+    log_dir = f"{str(values.get('log_dir')).rstrip('/')}/{datetime.now().strftime('%Y%m%d_%H%M%S')}" if values.get("log_dir") else None
+    values["log_dir"] = resolve_path(log_dir)
 
     return Config(**values)
 
@@ -171,6 +182,7 @@ def train(config: Config):
     # prepare data
     set_seed(config.seed)
     device = get_device()
+    print(f"we will using {device}.")
     tokenizer = BPETokenizer(config.tokenizer_path)
 
     print("vocab_size:", tokenizer.vocab_size)
@@ -306,7 +318,8 @@ def train(config: Config):
             losses = []
             for _ in range(config.eval_iters):
                 x, y = eval_batcher.next_batch()
-                _, loss = model(x, y)
+                with get_autocast_context(device, config.precision):
+                    _, loss = model(x, y)
                 losses.append(loss.item())
 
             mean_loss = sum(losses) / len(losses)
@@ -319,7 +332,8 @@ def train(config: Config):
             losses = []
             for _ in range(config.eval_iters):
                 x, y = get_batch(data, config.batch_size, config.seq_len, device)
-                _, loss = model(x, y)
+                with get_autocast_context(device, config.precision):
+                    _, loss = model(x, y)
                 losses.append(loss.item())
 
             out[split] = sum(losses) / len(losses)
@@ -361,7 +375,9 @@ def train(config: Config):
             else:
                 assert train_data is not None
                 x, y = get_batch(train_data, config.batch_size, config.seq_len, device)
-            logits, loss = model(x, y)
+
+            with get_autocast_context(device, config.precision):
+                logits, loss = model(x, y)
 
             raw_loss = loss.item()
             loss_accum += raw_loss
