@@ -1,6 +1,6 @@
-batch_size: 2
+batch_size: 4
 seq_len: 1024
-max_steps: 1000
+max_steps: 160000
 eval_interval: 100
 eval_iters: 5
 checkpoint_interval: 500
@@ -9,6 +9,7 @@ min_lr: 0.00003
 warmup_steps: 100
 seed: 42
 grad_clip: 1.0
+grad_accum_steps: 32
 
 data_source: parquet
 data_path: data/fineweb-edu-modelscope/sample/10BT/*.parquet
@@ -26,3 +27,5 @@ n_layers: 12
 n_heads: 12
 d_model: 768
 dropout: 0.0
+
+log_dir: runs/fineweb_10bt
