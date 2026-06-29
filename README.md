@@ -42,3 +42,25 @@ ssh -L 6006:localhost:6006 user@server
 
 - Using hand-writing `scaled_dot_product_attention`: 3.127min ~ 20steps
 - Using pytoch-implementation `scaled_dot_product_attention`: 1.227min ~ 20steps
+
+## Test Reminder
+
+### Train
+
+- DataLoader
+- Weight Tying
+- DDP
+
+### Pre-train
+
+- Pretrain Dataset Recipe(Fineweb; bigcode/the-stack-v2;)
+- Pretrain Annealing (Scaling Laws and Compute-Optimal Training Beyond Fixed Training Durations; Scaling Law with Learning Rate Annealing; MiniCPM; TinyLlama; Mid-Training of Large Language Models: A Survey)
+- GQA
+
+### Post-train
+
+#### SFT
+
+- HuggingFaceTB/smol-smoltalk
+- HuggingFaceH4/no_robots
+- HuggingFaceH4/ultrachat_200k
