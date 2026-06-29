@@ -37,3 +37,8 @@ uv run tensorboard --logdir runs
 # use ssh tunnel if you need
 ssh -L 6006:localhost:6006 user@server
 ```
+
+#### Performance Metrics
+
+- Using hand-writing `scaled_dot_product_attention`: 3.127min ~ 20steps
+- Using pytoch-implementation `scaled_dot_product_attention`: 1.227min ~ 20steps

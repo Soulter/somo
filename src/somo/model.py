@@ -61,7 +61,7 @@ class CausalSelfAttention(nn.Module):
 
         # apply dot product attention
         # apply this attention magic for every head.
-        y = MyF.scaled_dot_product_attention(
+        y = F.scaled_dot_product_attention(
             q,
             k,
             v,
