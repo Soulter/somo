@@ -8,6 +8,12 @@ A small language model from scratch.
 uv sync
 ```
 
+## Environment
+
+Server: A100 * 8 (currently I just using 1 GPU)
+
+`configs/train_fineweb_10bt_100m.yaml` is adjust to A100 * 1
+
 ## Run
 
 ### tiny shakespeare

@@ -1,4 +1,4 @@
-batch_size: 8
+batch_size: 16
 seq_len: 1024
 max_steps: 76294
 eval_interval: 100
