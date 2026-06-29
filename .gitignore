@@ -1,4 +1,7 @@
 __pycache__
 checkpoints/
+logs/
 *.egg-info
 data/fineweb_sample_100k.jsonl
+data/fineweb-edu/
+data/fineweb-edu-modelscope/

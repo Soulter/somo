@@ -48,6 +48,7 @@ class StreamingTokenBatcher:
         text_column: str,
         shuffle_buffer_size: int = 10_000,
         seed: int = 42,
+        data_files: str | list[str] | None = None,
     ):
         self.tokenizer = tokenizer
         self.batch_size = batch_size
@@ -56,11 +57,16 @@ class StreamingTokenBatcher:
         self.text_column = text_column
         self.buffer: list[int] = []
 
+        dataset_kwargs = {}
+        if data_files is not None:
+            dataset_kwargs["data_files"] = data_files
+
         self.dataset = load_dataset(
             dataset_name,
             dataset_config,
             split=dataset_split,
             streaming=True,
+            **dataset_kwargs,
         )
         if shuffle_buffer_size > 0:
             self.dataset = self.dataset.shuffle(

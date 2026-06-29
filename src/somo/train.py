@@ -171,7 +171,7 @@ def train(config: Config):
 
     print("vocab_size:", tokenizer.vocab_size)
 
-    is_streaming = config.data_source in {"hf", "jsonl"}
+    is_streaming = config.data_source in {"hf", "jsonl", "parquet"}
 
     if config.data_source == "local":
         text = read_text(config.data_path)
@@ -238,6 +238,37 @@ def train(config: Config):
             line_remainders={0},
         )
         print("jsonl dataset:", config.data_path)
+    elif config.data_source == "parquet":
+        train_data = None
+        val_data = None
+        data_files = str(config.data_path)
+        train_batcher = StreamingTokenBatcher(
+            tokenizer=tokenizer,
+            batch_size=config.batch_size,
+            seq_len=config.seq_len,
+            device=device,
+            dataset_name="parquet",
+            dataset_config=None,
+            dataset_split="train",
+            text_column=config.text_column,
+            shuffle_buffer_size=config.shuffle_buffer_size,
+            seed=config.seed,
+            data_files=data_files,
+        )
+        eval_batcher = StreamingTokenBatcher(
+            tokenizer=tokenizer,
+            batch_size=config.batch_size,
+            seq_len=config.seq_len,
+            device=device,
+            dataset_name="parquet",
+            dataset_config=None,
+            dataset_split="train",
+            text_column=config.text_column,
+            shuffle_buffer_size=max(1, config.shuffle_buffer_size // 10),
+            seed=config.seed + 1,
+            data_files=data_files,
+        )
+        print("parquet dataset:", data_files)
     else:
         raise ValueError(f"unknown data_source: {config.data_source}")
 

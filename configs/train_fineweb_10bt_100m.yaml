@@ -1,0 +1,28 @@
+batch_size: 2
+seq_len: 1024
+max_steps: 1000
+eval_interval: 100
+eval_iters: 5
+checkpoint_interval: 500
+learning_rate: 0.0003
+min_lr: 0.00003
+warmup_steps: 100
+seed: 42
+grad_clip: 1.0
+
+data_source: parquet
+data_path: data/fineweb-edu-modelscope/sample/10BT/*.parquet
+text_column: text
+shuffle_buffer_size: 10000
+
+tokenizer_path: tokenizers/fineweb-8k-bpe.json
+tokenizer_vocab_size: 8192
+tokenizer_train_max_documents: 100000
+
+checkpoint_path: checkpoints/fineweb-10bt-100m.pt
+resume_path: null
+
+n_layers: 12
+n_heads: 12
+d_model: 768
+dropout: 0.0
