@@ -11,9 +11,17 @@ dependencies = [
     "pyyaml>=6.0.3",
     "tensorboard>=2.20.0",
     "tokenizers>=0.23.1",
-    "torch>=2.12.1",
+    "torch==2.12.1+cu126",
     "tqdm>=4.68.3",
 ]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu126" }
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
 
 [build-system]
 requires = ["setuptools>=69"]
