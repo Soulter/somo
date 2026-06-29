@@ -8,6 +8,7 @@ import numpy as np
 import torch
 import yaml
 
+from torch.utils.tensorboard import SummaryWriter
 from .data import (
     JsonlTokenBatcher,
     StreamingTokenBatcher,
@@ -48,6 +49,8 @@ class Config:
     n_heads: int = 4
     d_model: int = 256
     dropout: float = 0.0
+    grad_accum_steps: int = 1 # micro batch
+    log_dir: Path | None = None
 
 
 def resolve_path(value: str | Path | None) -> Path | None:
@@ -73,6 +76,7 @@ def load_config(path: str | Path) -> Config:
         values.get("checkpoint_path", Config.checkpoint_path)
     )
     values["resume_path"] = resolve_path(values.get("resume_path"))
+    values["log_dir"] = resolve_path(values.get("log_dir"))
 
     return Config(**values)
 
@@ -309,6 +313,7 @@ def train(config: Config):
             model.train()
             return {"train": mean_loss, "val": mean_loss}
 
+        assert train_data is not None and val_data is not None
         out = {}
         for split, data in [("train", train_data), ("val", val_data)]:
             losses = []
@@ -322,11 +327,18 @@ def train(config: Config):
         model.train()
         return out
 
+    # prepare tensorboard writer
+    writer = None
+    if config.log_dir is not None:
+        writer = SummaryWriter(config.log_dir)
+
     for step in range(start_step, config.max_steps):
+        # dynamic lr
         lr = get_lr(step, config)
         for param_group in optimizer.param_groups:
             param_group["lr"] = lr
 
+        # output logs
         if step % config.eval_interval == 0:
             losses = estimate_loss()
             print(
@@ -335,23 +347,70 @@ def train(config: Config):
                 f"val loss {losses['val']:.4f}, "
                 f"lr {lr:.2e}"
             )
+            if writer is not None:
+                writer.add_scalar("loss/train", losses["train"], step)
+                writer.add_scalar("loss/val", losses["val"], step)
+                writer.add_scalar("lr", lr, step)   
 
-        if is_streaming:
-            x, y = train_batcher.next_batch()
-        else:
-            x, y = get_batch(train_data, config.batch_size, config.seq_len, device)
-        logits, loss = model(x, y)
         optimizer.zero_grad(set_to_none=True)  # clear grad
-        loss.backward()
+
+        loss_accum = 0.0
+        for micro_step in range(config.grad_accum_steps):
+            if is_streaming and train_batcher:
+                x, y = train_batcher.next_batch()
+            else:
+                assert train_data is not None
+                x, y = get_batch(train_data, config.batch_size, config.seq_len, device)
+            logits, loss = model(x, y)
+
+            raw_loss = loss.item()
+            loss_accum += raw_loss
+            if writer is not None:
+                # note: step is started from 0, so we don't need (step - 1) * config.grad_accum_steps
+                writer.add_scalar("loss/step_micro", raw_loss, step * config.grad_accum_steps + micro_step)
+            # here, finally the loss is: (grad(loss_1) + grad(loss_2) + ... + grad(loss_N)) / N
+            # because pytorch accumulates the grad but not cover.
+            loss = loss / config.grad_accum_steps
+            loss.backward()
+
         if config.grad_clip > 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
         optimizer.step()
+
+        if writer is not None:
+            mean_loss = loss_accum / config.grad_accum_steps
+            writer.add_scalar("loss/step", mean_loss, step)
+
+            tokens_per_step = config.batch_size * config.seq_len * config.grad_accum_steps
+            seen_tokens = (step + 1) * tokens_per_step
+            writer.add_scalar("tokens/seen", seen_tokens, step)
+            writer.add_scalar("loss/step_by_tokens", mean_loss, seen_tokens)
+
+            if torch.cuda.is_available():
+                writer.add_scalar(
+                    "gpu/memory_allocated_mb",
+                    torch.cuda.memory_allocated() / 1024**2,
+                    step,
+                )
+                writer.add_scalar(
+                    "gpu/memory_reserved_mb",
+                    torch.cuda.memory_reserved() / 1024**2,
+                    step,
+                )
+                writer.add_scalar(
+                    "gpu/max_memory_allocated_mb",
+                    torch.cuda.max_memory_allocated() / 1024**2,
+                    step,
+                )
 
         if (
             config.checkpoint_interval > 0
             and (step + 1) % config.checkpoint_interval == 0
         ):
             save_checkpoint(config, model, optimizer, step + 1, gpt_config)
+
+    if writer is not None:
+        writer.close()
 
     if (
         config.checkpoint_interval <= 0
