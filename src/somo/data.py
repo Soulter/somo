@@ -1,5 +1,6 @@
 import json
 import torch
+import random
 from pathlib import Path
 from datasets import load_dataset
 
@@ -12,27 +13,33 @@ def read_text(path: str | Path) -> str:
         return f.read()
 
 
-def make_data(text: str, tokenizer: BaseTokenizer):
-    ids = tokenizer.encode(text)
-    data = torch.tensor(ids, dtype=torch.long)
+class TensorTokenBatcher:
+    def __init__(
+        self,
+        data: torch.Tensor,
+        batch_size: int,
+        seq_len: int,
+        device: str,
+    ):
+        if len(data) <= seq_len + 1:
+            raise ValueError(
+                f"data is too short for seq_len={seq_len}: got {len(data)} tokens"
+            )
 
-    n = int(0.9 * len(data))
-    train_data = data[:n]
-    val_data = data[n:]
+        self.data = data
+        self.batch_size = batch_size
+        self.seq_len = seq_len
+        self.device = device
 
-    return train_data, val_data
-
-
-def get_batch(data: torch.Tensor, batch_size: int, seq_len: int, device: str):
-    # torch.randint(low, high, size)
-    # generate batch_size random batches in the data, and return their's start index
-    ix = torch.randint(0, len(data) - seq_len - 1, (batch_size,))
-
-    x = torch.stack([data[i : i + seq_len] for i in ix])
-
-    y = torch.stack([data[i + 1 : i + seq_len + 1] for i in ix])
-
-    return x.to(device), y.to(device)  # B, T
+    def next_batch(self):
+        ix = torch.randint(
+            0,
+            len(self.data) - self.seq_len - 1,
+            (self.batch_size,),
+        )
+        x = torch.stack([self.data[i : i + self.seq_len] for i in ix])
+        y = torch.stack([self.data[i + 1 : i + self.seq_len + 1] for i in ix])
+        return x.to(self.device), y.to(self.device)
 
 
 class StreamingTokenBatcher:
@@ -177,20 +184,21 @@ class JsonlTokenBatcher:
 
         return x.to(self.device), y.to(self.device)
 
+class MixedTokenBatcher:
+    def __init__(self, sources: list[dict], seed: int = 42):
+        self.names = [source["name"] for source in sources]
+        self.weights = [source["weight"] for source in sources]
+        self.batchers = [source["batcher"] for source in sources]
+        self.rng = random.Random(seed)
+        self.counts = {name: 0 for name in self.names}
 
-if __name__ == "__main__":
-    text = read_text("data/tinyshakespeare.txt")
-    tokenizer = BPETokenizer("tokenizers/tiny-bpe.json")
-    train_data, val_data = make_data(text, tokenizer)
+    def next_batch(self):
+        i = self.rng.choices(
+            range(len(self.batchers)),
+            weights=self.weights,
+            k=1,
+        )[0]
 
-    x, y = get_batch(
-        train_data,
-        batch_size=4,
-        seq_len=16,
-        device="cpu",
-    )
-
-    print(x.shape)
-    print(y.shape)
-    print(x[0])
-    print(y[0])
+        name = self.names[i]
+        self.counts[name] += 1
+        return self.batchers[i].next_batch()

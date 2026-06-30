@@ -12,10 +12,21 @@ grad_clip: 1.0
 grad_accum_steps: 32
 precision: bf16
 
-data_source: parquet
-data_path: data/fineweb-edu-modelscope/sample/10BT/*.parquet
-text_column: text
 shuffle_buffer_size: 10000
+
+train_datasets:
+  - name: fineweb_edu_train
+    data_source: parquet
+    data_path: data/fineweb-edu-modelscope/sample/10BT/train/*.parquet
+    text_column: text
+    weight: 1.0
+
+eval_datasets:
+  - name: fineweb_edu_val
+    data_source: parquet
+    data_path: data/fineweb-edu-modelscope/sample/10BT/val/*.parquet
+    text_column: text
+    weight: 1.0
 
 tokenizer_path: tokenizers/fineweb-8k-bpe.json
 tokenizer_vocab_size: 8192

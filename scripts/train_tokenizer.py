@@ -8,9 +8,7 @@ from tokenizers.pre_tokenizers import ByteLevel
 from tokenizers.decoders import ByteLevel as ByteLevelDecoder
 from tokenizers.trainers import BpeTrainer
 from datasets import load_dataset
-from somo.train import Config
-
-from somo.train import load_config
+from somo.train import Config, DatasetConfig, load_config
 
 
 def parse_args():
@@ -24,66 +22,159 @@ def parse_args():
     return parser.parse_args()
 
 
-def iter_local_text(config):
-    with open(config.data_path, "r", encoding="utf-8") as f:
+def iter_local_text(dataset: DatasetConfig):
+    assert dataset.data_path is not None, "local dataset must have data_path"
+    with open(dataset.data_path, "r", encoding="utf-8") as f:
         yield f.read()
 
 
-def iter_jsonl_text(config: Config):
+def iter_jsonl_text(dataset: DatasetConfig, max_documents: int):
     count = 0
-    with open(config.data_path, "r", encoding="utf-8") as f:
+    assert dataset.data_path is not None, "jsonl dataset must have data_path"
+    with open(dataset.data_path, "r", encoding="utf-8") as f:
         for line in f:
             if not line.strip():
                 continue
 
             row = json.loads(line)
-            text = row.get(config.text_column)
+            text = row.get(dataset.text_column)
             if not text:
                 continue
 
             yield text
             count += 1
-            if count >= config.tokenizer_train_max_documents:
+            if count >= max_documents:
                 break
 
 
-def iter_hf_text(config: Config):
-    if config.dataset_name is None:
-        raise ValueError("dataset_name is required when data_source is 'hf'")
-
+def iter_hf_text(
+    dataset_config: DatasetConfig,
+    max_documents: int,
+    shuffle_buffer_size: int,
+    seed: int,
+):
+    assert dataset_config.dataset_name is not None, "HF dataset must have dataset_name"
     dataset = load_dataset(
-        config.dataset_name,
-        config.dataset_config,
-        split=config.dataset_split,
+        dataset_config.dataset_name,
+        dataset_config.dataset_config,
+        split=dataset_config.dataset_split,
         streaming=True,
     )
-    if config.shuffle_buffer_size > 0:
+    if shuffle_buffer_size > 0:
         dataset = dataset.shuffle(
-            buffer_size=config.shuffle_buffer_size,
-            seed=config.seed,
+            buffer_size=shuffle_buffer_size,
+            seed=seed,
         )
 
     count = 0
     for row in dataset:
-        text = row.get(config.text_column)
+        text = row.get(dataset_config.text_column)
         if not text:
             continue
 
         yield text
         count += 1
-        if count >= config.tokenizer_train_max_documents:
+        if count >= max_documents:
             break
 
 
-def get_text_iterator(config: Config):
-    if config.data_source == "local":
-        return iter_local_text(config), 1
-    if config.data_source == "jsonl":
-        return iter_jsonl_text(config), config.tokenizer_train_max_documents
-    if config.data_source == "hf":
-        return iter_hf_text(config), config.tokenizer_train_max_documents
+def iter_parquet_text(
+    dataset_config: DatasetConfig,
+    max_documents: int,
+    shuffle_buffer_size: int,
+    seed: int,
+):
+    dataset = load_dataset(
+        "parquet",
+        data_files=str(dataset_config.data_path),
+        split=dataset_config.dataset_split,
+        streaming=True,
+    )
+    if shuffle_buffer_size > 0:
+        dataset = dataset.shuffle(
+            buffer_size=shuffle_buffer_size,
+            seed=seed,
+        )
 
-    raise ValueError(f"unknown data_source: {config.data_source}")
+    count = 0
+    for row in dataset:
+        text = row.get(dataset_config.text_column)
+        if not text:
+            continue
+
+        yield text
+        count += 1
+        if count >= max_documents:
+            break
+
+
+def iter_dataset_text(
+    dataset_config: DatasetConfig,
+    max_documents: int,
+    shuffle_buffer_size: int,
+    seed: int,
+):
+    if dataset_config.data_source == "local":
+        yield from iter_local_text(dataset_config)
+        return
+
+    if dataset_config.data_source == "jsonl":
+        yield from iter_jsonl_text(dataset_config, max_documents)
+        return
+
+    if dataset_config.data_source == "hf":
+        yield from iter_hf_text(
+            dataset_config,
+            max_documents=max_documents,
+            shuffle_buffer_size=shuffle_buffer_size,
+            seed=seed,
+        )
+        return
+
+    if dataset_config.data_source == "parquet":
+        yield from iter_parquet_text(
+            dataset_config,
+            max_documents=max_documents,
+            shuffle_buffer_size=shuffle_buffer_size,
+            seed=seed,
+        )
+        return
+
+    raise ValueError(
+        f"unknown tokenizer dataset source: "
+        f"{dataset_config.name} uses {dataset_config.data_source}"
+    )
+
+
+def get_text_iterator(config: Config):
+    assert config.train_datasets is not None, "config must have train_datasets"
+    total_weight = sum(dataset.weight for dataset in config.train_datasets)
+    lengths = []
+
+    for dataset in config.train_datasets:
+        if dataset.data_source == "local":
+            lengths.append(1)
+            continue
+
+        length = round(config.tokenizer_train_max_documents * dataset.weight / total_weight)
+        lengths.append(max(1, length))
+
+    def iterator():
+        assert config.train_datasets is not None, "config must have train_datasets"
+        for i, dataset in enumerate(config.train_datasets):
+            shuffle_buffer_size = (
+                dataset.shuffle_buffer_size
+                if dataset.shuffle_buffer_size is not None
+                else config.shuffle_buffer_size
+            )
+            yield from iter_dataset_text(
+                dataset,
+                max_documents=lengths[i],
+                shuffle_buffer_size=shuffle_buffer_size,
+                seed=config.seed + i,
+            )
+
+    return iterator(), sum(lengths)
 
 
 def train_tokenizer(config_path: Path):

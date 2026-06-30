@@ -1,32 +1,35 @@
 batch_size: 16
-seq_len: 128
-max_steps: 1000
+seq_len: 1024
+max_steps: 76294
 eval_interval: 100
-eval_iters: 10
+eval_iters: 5
 checkpoint_interval: 500
 learning_rate: 0.0003
 min_lr: 0.00003
 warmup_steps: 100
 seed: 42
 grad_clip: 1.0
-
-shuffle_buffer_size: 10000
+grad_accum_steps: 32
+precision: bf16
 
 train_datasets:
   - name: fineweb_edu
+    data_source: parquet
+    data_path: data/fineweb-edu-modelscope/sample/10BT/train/*.parquet
+    text_column: text
+    weight: 0.9
+  - name: fineweb_edu_hf
     data_source: hf
     dataset_name: HuggingFaceFW/fineweb-edu
     dataset_config: sample-10BT
     dataset_split: train
     text_column: text
-    weight: 1.0
+    weight: 0.1
 
 eval_datasets:
-  - name: fineweb_edu_eval
-    data_source: hf
-    dataset_name: HuggingFaceFW/fineweb-edu
-    dataset_config: sample-10BT
-    dataset_split: train
+  - name: fineweb_edu_val
+    data_source: parquet
+    data_path: data/fineweb-edu-modelscope/sample/10BT/val/*.parquet
     text_column: text
     weight: 1.0
 
@@ -34,10 +37,12 @@ tokenizer_path: tokenizers/fineweb-8k-bpe.json
 tokenizer_vocab_size: 8192
 tokenizer_train_max_documents: 100000
 
-checkpoint_path: checkpoints/fineweb-tiny.pt
+checkpoint_path: checkpoints/fineweb-10bt-100m.pt
 resume_path: null
 
-n_layers: 4
-n_heads: 4
-d_model: 256
+n_layers: 12
+n_heads: 12
+d_model: 768
 dropout: 0.0
+
+log_dir: runs/fineweb_10bt

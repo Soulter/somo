@@ -12,14 +12,29 @@ import yaml
 
 from torch.utils.tensorboard import SummaryWriter
 from .data import (
+    MixedTokenBatcher,
     JsonlTokenBatcher,
+    TensorTokenBatcher,
     StreamingTokenBatcher,
-    get_batch,
-    make_data,
     read_text,
 )
 from .tokenizers.bpe import BPETokenizer
 from .model import GPT, GPTConfig
+
+
+@dataclass
+class DatasetConfig:
+    name: str
+    data_source: str
+    weight: float = 1.0
+
+    data_path: Path | None = None
+    dataset_name: str | None = None
+    dataset_config: str | None = None
+    dataset_split: str = "train"
+
+    text_column: str = "text"
+    shuffle_buffer_size: int | None = None
 
 
 @dataclass
@@ -35,12 +50,8 @@ class Config:
     warmup_steps: int = 100
     seed: int = 42
     grad_clip: float = 1.0
-    data_source: str = "local"
-    data_path: Path = Path("data/tinyshakespeare.txt")
-    dataset_name: str | None = None
-    dataset_config: str | None = None
-    dataset_split: str = "train"
-    text_column: str = "text"
+    train_datasets: list[DatasetConfig] | None = None
+    eval_datasets: list[DatasetConfig] | None = None
     shuffle_buffer_size: int = 10_000
     tokenizer_path: Path = Path("tokenizers/tiny-bpe.json")
     tokenizer_vocab_size: int = 2048
@@ -55,12 +66,14 @@ class Config:
     log_dir: Path | None = None
     precision: str = "bf16"
 
+
 def get_autocast_context(device: str, precision: str):
     if device == "cuda" and precision == "bf16":
         return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
     if device == "cuda" and precision == "fp16":
         return torch.autocast(device_type="cuda", dtype=torch.float16)
     return nullcontext()
+
 
 def resolve_path(value: str | Path | None) -> Path | None:
     if value is None:
@@ -73,11 +86,49 @@ def resolve_path(value: str | Path | None) -> Path | None:
     return path
 
 
+def validate_dataset_config(dataset: DatasetConfig):
+    if dataset.weight <= 0:
+        raise ValueError(f"dataset weight must be positive: {dataset.name}")
+
+    if dataset.data_source == "hf" and dataset.dataset_name is None:
+        raise ValueError(f"dataset_name is required for hf dataset: {dataset.name}")
+
+    if dataset.data_source in {"local", "jsonl", "parquet"} and dataset.data_path is None:
+        raise ValueError(
+            f"data_path is required for {dataset.data_source} dataset: {dataset.name}"
+        )
+
+
+def parse_dataset_configs(values: dict, key: str) -> list[DatasetConfig]:
+    dataset_values = values.get(key)
+    if dataset_values is None:
+        return []
+
+    datasets = []
+    for item in dataset_values:
+        item = dict(item)
+        if item.get("data_path") is not None:
+            item["data_path"] = resolve_path(item["data_path"])
+
+        dataset = DatasetConfig(**item)
+        validate_dataset_config(dataset)
+        datasets.append(dataset)
+
+    return datasets
+
+
 def load_config(path: str | Path) -> Config:
     with open(path, "r", encoding="utf-8") as f:
         values = yaml.safe_load(f) or {}
 
-    values["data_path"] = resolve_path(values.get("data_path", Config.data_path))
+    train_datasets = parse_dataset_configs(values, "train_datasets")
+    eval_datasets = parse_dataset_configs(values, "eval_datasets")
+    if not train_datasets:
+        raise ValueError("train_datasets is required in the training config")
+
+    values["train_datasets"] = train_datasets
+    values["eval_datasets"] = eval_datasets or list(train_datasets)
+
     values["tokenizer_path"] = resolve_path(
         values.get("tokenizer_path", Config.tokenizer_path)
     )
@@ -178,6 +229,121 @@ def load_checkpoint(
     return step
 
 
+def build_token_batcher_from_dataset_config(
+    dataset: DatasetConfig,
+    tokenizer: BPETokenizer,
+    batch_size: int,
+    seq_len: int,
+    device: str,
+    default_shuffle_buffer_size: int,
+    seed: int,
+):
+    shuffle_buffer_size = (
+        dataset.shuffle_buffer_size
+        if dataset.shuffle_buffer_size is not None
+        else default_shuffle_buffer_size
+    )
+
+    if dataset.data_source == "hf":
+        if dataset.dataset_name is None:
+            raise ValueError(f"dataset_name is required for hf dataset: {dataset.name}")
+
+        return StreamingTokenBatcher(
+            tokenizer=tokenizer,
+            batch_size=batch_size,
+            seq_len=seq_len,
+            device=device,
+            dataset_name=dataset.dataset_name,
+            dataset_config=dataset.dataset_config,
+            dataset_split=dataset.dataset_split,
+            text_column=dataset.text_column,
+            shuffle_buffer_size=shuffle_buffer_size,
+            seed=seed,
+        )
+
+    if dataset.data_source == "parquet":
+        if dataset.data_path is None:
+            raise ValueError(f"data_path is required for parquet dataset: {dataset.name}")
+
+        return StreamingTokenBatcher(
+            tokenizer=tokenizer,
+            batch_size=batch_size,
+            seq_len=seq_len,
+            device=device,
+            dataset_name="parquet",
+            dataset_config=None,
+            dataset_split="train",
+            text_column=dataset.text_column,
+            shuffle_buffer_size=shuffle_buffer_size,
+            seed=seed,
+            data_files=str(dataset.data_path),
+        )
+
+    if dataset.data_source == "jsonl":
+        if dataset.data_path is None:
+            raise ValueError(f"data_path is required for jsonl dataset: {dataset.name}")
+
+        return JsonlTokenBatcher(
+            tokenizer=tokenizer,
+            batch_size=batch_size,
+            seq_len=seq_len,
+            device=device,
+            data_path=dataset.data_path,
+            text_column=dataset.text_column,
+        )
+
+    if dataset.data_source == "local":
+        if dataset.data_path is None:
+            raise ValueError(f"data_path is required for local dataset: {dataset.name}")
+
+        text = read_text(dataset.data_path)
+        ids = tokenizer.encode(text)
+        data = torch.tensor(ids, dtype=torch.long)
+        print(f"{dataset.name} tokens: {len(data)}")
+
+        return TensorTokenBatcher(
+            data=data,
+            batch_size=batch_size,
+            seq_len=seq_len,
+            device=device,
+        )
+
+    raise ValueError(
+        f"unknown dataset source in mixed config: "
+        f"{dataset.name} uses {dataset.data_source}"
+    )
+
+
+def build_mixed_token_batcher(
+    datasets: list[DatasetConfig],
+    tokenizer: BPETokenizer,
+    config: Config,
+    device: str,
+    seed: int,
+):
+    sources = []
+    for i, dataset in enumerate(datasets):
+        batcher = build_token_batcher_from_dataset_config(
+            dataset=dataset,
+            tokenizer=tokenizer,
+            batch_size=config.batch_size,
+            seq_len=config.seq_len,
+            device=device,
+            default_shuffle_buffer_size=config.shuffle_buffer_size,
+            seed=seed + i,
+        )
+
+        sources.append(
+            {
+                "name": dataset.name,
+                "weight": dataset.weight,
+                "batcher": batcher,
+            }
+        )
+
+    return MixedTokenBatcher(sources, seed=seed)
+
+
 def train(config: Config):
     # prepare data
     set_seed(config.seed)
@@ -187,106 +353,38 @@ def train(config: Config):
 
     print("vocab_size:", tokenizer.vocab_size)
 
-    is_streaming = config.data_source in {"hf", "jsonl", "parquet"}
+    if not config.train_datasets:
+        raise ValueError("train_datasets is required")
+    if not config.eval_datasets:
+        raise ValueError("eval_datasets is required")
 
-    if config.data_source == "local":
-        text = read_text(config.data_path)
-        train_data, val_data = make_data(text, tokenizer)
-        train_batcher = None
-        print("train tokens:", len(train_data))
-        print("val tokens:", len(val_data))
-    elif config.data_source == "hf":
-        if config.dataset_name is None:
-            raise ValueError("dataset_name is required when data_source is 'hf'")
-        train_data = None
-        val_data = None
-        train_batcher = StreamingTokenBatcher(
-            tokenizer=tokenizer,
-            batch_size=config.batch_size,
-            seq_len=config.seq_len,
-            device=device,
-            dataset_name=config.dataset_name,
-            dataset_config=config.dataset_config,
-            dataset_split=config.dataset_split,
-            text_column=config.text_column,
-            shuffle_buffer_size=config.shuffle_buffer_size,
-            seed=config.seed,
-        )
-        eval_batcher = StreamingTokenBatcher(
-            tokenizer=tokenizer,
-            batch_size=config.batch_size,
-            seq_len=config.seq_len,
-            device=device,
-            dataset_name=config.dataset_name,
-            dataset_config=config.dataset_config,
-            dataset_split=config.dataset_split,
-            text_column=config.text_column,
-            shuffle_buffer_size=max(1, config.shuffle_buffer_size // 10),
-            seed=config.seed + 1,
-        )
-        print(
-            "hf dataset:",
-            config.dataset_name,
-            config.dataset_config,
-            config.dataset_split,
-        )
-    elif config.data_source == "jsonl":
-        train_data = None
-        val_data = None
-        train_batcher = JsonlTokenBatcher(
-            tokenizer=tokenizer,
-            batch_size=config.batch_size,
-            seq_len=config.seq_len,
-            device=device,
-            data_path=config.data_path,
-            text_column=config.text_column,
-            line_mod=10,
-            line_remainders=set(range(1, 10)),
-        )
-        eval_batcher = JsonlTokenBatcher(
-            tokenizer=tokenizer,
-            batch_size=config.batch_size,
-            seq_len=config.seq_len,
-            device=device,
-            data_path=config.data_path,
-            text_column=config.text_column,
-            line_mod=10,
-            line_remainders={0},
-        )
-        print("jsonl dataset:", config.data_path)
-    elif config.data_source == "parquet":
-        train_data = None
-        val_data = None
-        data_files = str(config.data_path)
-        train_batcher = StreamingTokenBatcher(
-            tokenizer=tokenizer,
-            batch_size=config.batch_size,
-            seq_len=config.seq_len,
-            device=device,
-            dataset_name="parquet",
-            dataset_config=None,
-            dataset_split="train",
-            text_column=config.text_column,
-            shuffle_buffer_size=config.shuffle_buffer_size,
-            seed=config.seed,
-            data_files=data_files,
-        )
-        eval_batcher = StreamingTokenBatcher(
-            tokenizer=tokenizer,
-            batch_size=config.batch_size,
-            seq_len=config.seq_len,
-            device=device,
-            dataset_name="parquet",
-            dataset_config=None,
-            dataset_split="train",
-            text_column=config.text_column,
-            shuffle_buffer_size=max(1, config.shuffle_buffer_size // 10),
-            seed=config.seed + 1,
-            data_files=data_files,
-        )
-        print("parquet dataset:", data_files)
-    else:
-        raise ValueError(f"unknown data_source: {config.data_source}")
+    train_batcher = build_mixed_token_batcher(
+        datasets=config.train_datasets,
+        tokenizer=tokenizer,
+        config=config,
+        device=device,
+        seed=config.seed,
+    )
+    train_eval_batcher = build_mixed_token_batcher(
+        datasets=config.train_datasets,
+        tokenizer=tokenizer,
+        config=config,
+        device=device,
+        seed=config.seed + 10_000,
+    )
+    eval_batcher = build_mixed_token_batcher(
+        datasets=config.eval_datasets,
+        tokenizer=tokenizer,
+        config=config,
+        device=device,
+        seed=config.seed + 20_000,
+    )
+    print("train datasets:")
+    for dataset in config.train_datasets:
+        print(f"  {dataset.name}: {dataset.data_source}, weight={dataset.weight}")
+    print("eval datasets:")
+    for dataset in config.eval_datasets:
+        print(f"  {dataset.name}: {dataset.data_source}, weight={dataset.weight}")
 
     # prepare model
     gpt_config = GPTConfig(
@@ -314,30 +412,19 @@ def train(config: Config):
     def estimate_loss():
         model.eval()
 
-        if is_streaming:
-            losses = []
-            for _ in range(config.eval_iters):
-                x, y = eval_batcher.next_batch()
-                with get_autocast_context(device, config.precision):
-                    _, loss = model(x, y)
-                losses.append(loss.item())
-
-            mean_loss = sum(losses) / len(losses)
-            model.train()
-            return {"train": mean_loss, "val": mean_loss}
-
-        assert train_data is not None and val_data is not None
         out = {}
-        for split, data in [("train", train_data), ("val", val_data)]:
+        for split, batcher in [
+            ("train", train_eval_batcher),
+            ("val", eval_batcher),
+        ]:
             losses = []
             for _ in range(config.eval_iters):
-                x, y = get_batch(data, config.batch_size, config.seq_len, device)
+                x, y = batcher.next_batch()
                 with get_autocast_context(device, config.precision):
                     _, loss = model(x, y)
                 losses.append(loss.item())
 
             out[split] = sum(losses) / len(losses)
-
         model.train()
         return out
 
@@ -370,11 +457,7 @@ def train(config: Config):
 
         loss_accum = 0.0
         for micro_step in range(config.grad_accum_steps):
-            if is_streaming and train_batcher:
-                x, y = train_batcher.next_batch()
-            else:
-                assert train_data is not None
-                x, y = get_batch(train_data, config.batch_size, config.seq_len, device)
+            x, y = train_batcher.next_batch()
 
             with get_autocast_context(device, config.precision):
                 logits, loss = model(x, y)
