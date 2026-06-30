@@ -9,11 +9,23 @@ min_lr: 0.00003
 warmup_steps: 100
 seed: 42
 grad_clip: 1.0
+grad_accum_steps: 1
+precision: bf16
+num_workers: 0
+pin_memory: true
 
-data_source: local
-data_path: data/tinyshakespeare.txt
 checkpoint_path: checkpoints/tiny.pt
 resume_path: null
+
+train_datasets:
+  - name: tinyshakespeare
+    tokenized_path: datasets/tinyshakespeare
+    weight: 1.0
+
+eval_datasets:
+  - name: tinyshakespeare_eval
+    tokenized_path: datasets/tinyshakespeare
+    weight: 1.0
 
 n_layers: 4
 n_heads: 4
@@ -21,4 +33,3 @@ d_model: 256
 dropout: 0.0
 
 tokenizer_path: tokenizers/tiny-bpe.json
-tokenizer_vocab_size: 2048

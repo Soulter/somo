@@ -1,196 +1,142 @@
 import json
-import torch
+import random
+from dataclasses import dataclass
 from pathlib import Path
-from datasets import load_dataset
 
-from .tokenizers.tokenizer import BaseTokenizer
-from .tokenizers.bpe import BPETokenizer
-
-
-def read_text(path: str | Path) -> str:
-    with open(path, "r", encoding="utf-8") as f:
-        return f.read()
+import numpy as np
+import torch
+from torch.utils.data import DataLoader, IterableDataset, get_worker_info
 
 
-def make_data(text: str, tokenizer: BaseTokenizer):
-    ids = tokenizer.encode(text)
-    data = torch.tensor(ids, dtype=torch.long)
-
-    n = int(0.9 * len(data))
-    train_data = data[:n]
-    val_data = data[n:]
-
-    return train_data, val_data
+DTYPES = {
+    "uint16": np.uint16,
+    "uint32": np.uint32,
+}
 
 
-def get_batch(data: torch.Tensor, batch_size: int, seq_len: int, device: str):
-    # torch.randint(low, high, size)
-    # generate batch_size random batches in the data, and return their's start index
-    ix = torch.randint(0, len(data) - seq_len - 1, (batch_size,))
+@dataclass
+class TokenizedShard:
+    tokens_path: Path
+    index_path: Path
+    meta_path: Path
+    dtype: str
+    num_tokens: int
+    num_docs: int
 
-    x = torch.stack([data[i : i + seq_len] for i in ix])
+    @classmethod
+    def from_meta(cls, meta_path: Path):
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        base = meta_path.parent
+        files = meta.get("files", {})
 
-    y = torch.stack([data[i + 1 : i + seq_len + 1] for i in ix])
-
-    return x.to(device), y.to(device)  # B, T
-
-
-class StreamingTokenBatcher:
-    def __init__(
-        self,
-        tokenizer: BaseTokenizer,
-        batch_size: int,
-        seq_len: int,
-        device: str,
-        dataset_name: str,
-        dataset_config: str | None,
-        dataset_split: str,
-        text_column: str,
-        shuffle_buffer_size: int = 10_000,
-        seed: int = 42,
-        data_files: str | list[str] | None = None,
-    ):
-        self.tokenizer = tokenizer
-        self.batch_size = batch_size
-        self.seq_len = seq_len
-        self.device = device
-        self.text_column = text_column
-        self.buffer: list[int] = []
-
-        dataset_kwargs = {}
-        if data_files is not None:
-            dataset_kwargs["data_files"] = data_files
-
-        self.dataset = load_dataset(
-            dataset_name,
-            dataset_config,
-            split=dataset_split,
-            streaming=True,
-            **dataset_kwargs,
+        return cls(
+            tokens_path=base / files.get("tokens", meta_path.name.replace(".meta.json", ".tokens")),
+            index_path=base / files.get("index", meta_path.name.replace(".meta.json", ".index")),
+            meta_path=meta_path,
+            dtype=meta["dtype"],
+            num_tokens=int(meta["num_tokens"]),
+            num_docs=int(meta["num_docs"]),
         )
-        if shuffle_buffer_size > 0:
-            self.dataset = self.dataset.shuffle(
-                buffer_size=shuffle_buffer_size,
-                seed=seed,
+
+    def open_tokens(self):
+        if self.dtype not in DTYPES:
+            raise ValueError(f"unsupported token dtype: {self.dtype}")
+        return np.memmap(
+            self.tokens_path,
+            dtype=DTYPES[self.dtype],
+            mode="r",
+            shape=(self.num_tokens,),
+        )
+
+
+class TokenizedDataset:
+    def __init__(self, path: str | Path):
+        self.path = Path(path)
+        if not self.path.exists():
+            raise FileNotFoundError(f"tokenized dataset not found: {self.path}")
+
+        self.shards = [
+            TokenizedShard.from_meta(path)
+            for path in sorted(self.path.glob("*.meta.json"))
+            if path.name != "dataset.meta.json"
+        ]
+        if not self.shards:
+            raise FileNotFoundError(f"no *.meta.json shards found in {self.path}")
+
+        self.total_tokens = sum(shard.num_tokens for shard in self.shards)
+        self.total_docs = sum(shard.num_docs for shard in self.shards)
+        self._tokens: dict[int, np.memmap] = {}
+
+    def _tokens_for_shard(self, shard_index: int):
+        if shard_index not in self._tokens:
+            self._tokens[shard_index] = self.shards[shard_index].open_tokens()
+        return self._tokens[shard_index]
+
+    def sample(self, seq_len: int, rng: random.Random):
+        usable_shards = [
+            i for i, shard in enumerate(self.shards) if shard.num_tokens > seq_len + 1
+        ]
+        if not usable_shards:
+            raise ValueError(
+                f"{self.path} has no shard long enough for seq_len={seq_len}"
             )
-        self.iterator = iter(self.dataset)
 
-    def _fill_buffer(self, min_tokens: int):
-        while len(self.buffer) < min_tokens:
-            row = next(self.iterator)
-            text = row.get(self.text_column)
-            if not text:
-                continue
+        weights = [self.shards[i].num_tokens for i in usable_shards]
+        shard_index = rng.choices(usable_shards, weights=weights, k=1)[0]
+        shard = self.shards[shard_index]
+        tokens = self._tokens_for_shard(shard_index)
 
-            ids = self.tokenizer.encode(text)
-            if not ids:
-                continue
+        start = rng.randrange(0, shard.num_tokens - seq_len - 1)
+        window = np.asarray(tokens[start : start + seq_len + 1], dtype=np.int64)
 
-            self.buffer.extend(ids)
-
-    def next_batch(self):
-        needed_tokens = self.batch_size * (self.seq_len + 1)
-        self._fill_buffer(needed_tokens)
-
-        chunk = self.buffer[:needed_tokens]
-        self.buffer = self.buffer[needed_tokens:]
-
-        data = torch.tensor(chunk, dtype=torch.long)
-        data = data.view(self.batch_size, self.seq_len + 1)
-
-        x = data[:, :-1]
-        y = data[:, 1:]
-
-        return x.to(self.device), y.to(self.device)
+        x = torch.from_numpy(window[:-1])
+        y = torch.from_numpy(window[1:])
+        return x, y
 
 
-class JsonlTokenBatcher:
+class TokenizedMixtureDataset(IterableDataset):
     def __init__(
         self,
-        tokenizer: BaseTokenizer,
-        batch_size: int,
+        sources: list[dict],
         seq_len: int,
-        device: str,
-        data_path: str | Path,
-        text_column: str,
-        line_mod: int | None = None,
-        line_remainders: set[int] | None = None,
+        seed: int,
     ):
-        self.tokenizer = tokenizer
-        self.batch_size = batch_size
+        self.names = [source["name"] for source in sources]
+        self.weights = [source["weight"] for source in sources]
+        self.datasets = [source["dataset"] for source in sources]
         self.seq_len = seq_len
-        self.device = device
-        self.data_path = Path(data_path)
-        self.text_column = text_column
-        self.line_mod = line_mod
-        self.line_remainders = line_remainders
-        self.buffer: list[int] = []
-        self.iterator = self._iter_text()
+        self.seed = seed
 
-        if self.line_mod is not None and self.line_mod <= 0:
-            raise ValueError("line_mod must be positive")
-        if not self.data_path.exists():
-            raise FileNotFoundError(f"jsonl data not found: {self.data_path}")
+    def __iter__(self):
+        worker_info = get_worker_info()
+        worker_id = worker_info.id if worker_info is not None else 0
+        rng = random.Random(self.seed + worker_id)
 
-    def _use_line(self, line_index: int) -> bool:
-        if self.line_mod is None or self.line_remainders is None:
-            return True
-
-        return line_index % self.line_mod in self.line_remainders
-
-    def _iter_text(self):
         while True:
-            with self.data_path.open("r", encoding="utf-8") as f:
-                for line_index, line in enumerate(f):
-                    if not self._use_line(line_index):
-                        continue
-
-                    if not line.strip():
-                        continue
-
-                    row = json.loads(line)
-                    text = row.get(self.text_column)
-                    if text:
-                        yield text
-
-    def _fill_buffer(self, min_tokens: int):
-        while len(self.buffer) < min_tokens:
-            text = next(self.iterator)
-            ids = self.tokenizer.encode(text)
-            if not ids:
-                continue
-
-            self.buffer.extend(ids)
-
-    def next_batch(self):
-        needed_tokens = self.batch_size * (self.seq_len + 1)
-        self._fill_buffer(needed_tokens)
-
-        chunk = self.buffer[:needed_tokens]
-        self.buffer = self.buffer[needed_tokens:]
-
-        data = torch.tensor(chunk, dtype=torch.long)
-        data = data.view(self.batch_size, self.seq_len + 1)
-
-        x = data[:, :-1]
-        y = data[:, 1:]
-
-        return x.to(self.device), y.to(self.device)
+            index = rng.choices(
+                range(len(self.datasets)),
+                weights=self.weights,
+                k=1,
+            )[0]
+            yield self.datasets[index].sample(self.seq_len, rng)
 
 
-if __name__ == "__main__":
-    text = read_text("data/tinyshakespeare.txt")
-    tokenizer = BPETokenizer("tokenizers/tiny-bpe.json")
-    train_data, val_data = make_data(text, tokenizer)
-
-    x, y = get_batch(
-        train_data,
-        batch_size=4,
-        seq_len=16,
-        device="cpu",
+def make_tokenized_dataloader(
+    sources: list[dict],
+    batch_size: int,
+    seq_len: int,
+    seed: int,
+    num_workers: int = 0,
+    pin_memory: bool = False,
+):
+    dataset = TokenizedMixtureDataset(
+        sources=sources,
+        seq_len=seq_len,
+        seed=seed,
     )
-
-    print(x.shape)
-    print(y.shape)
-    print(x[0])
-    print(y[0])
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+    )

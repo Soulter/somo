@@ -17,7 +17,10 @@ pin_memory: true
 train_datasets:
   - name: fineweb_edu_train
     tokenized_path: datasets/fineweb_edu_10bt/train
-    weight: 1.0
+    weight: 0.8
+  - name: zh_mixed_pretrain_2m
+    tokenized_path: datasets/zh_mixed_pretrain_2m
+    weight: 0.2
 
 eval_datasets:
   - name: fineweb_edu_val
@@ -26,7 +29,7 @@ eval_datasets:
 
 tokenizer_path: tokenizers/fineweb-8k-bpe.json
 
-checkpoint_path: checkpoints/fineweb-10bt-100m.pt
+checkpoint_path: checkpoints/fineweb-mixed-100m.pt
 resume_path: null
 
 n_layers: 12
@@ -34,4 +37,4 @@ n_heads: 12
 d_model: 768
 dropout: 0.0
 
-log_dir: runs/fineweb_10bt
+log_dir: runs/fineweb_mixed_100m

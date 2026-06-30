@@ -1,0 +1,12 @@
+seed: 42
+shuffle_buffer_size: 10000
+tokenizer_path: tokenizers/fineweb-8k-bpe.json
+tokenizer_vocab_size: 8192
+tokenizer_train_max_documents: 100000
+
+raw_datasets:
+  - name: fineweb_edu_train
+    data_source: parquet
+    data_path: data/fineweb-edu-modelscope/sample/10BT/train/*.parquet
+    text_column: text
+    weight: 1.0

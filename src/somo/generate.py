@@ -59,7 +59,8 @@ def main(config: GenerateConfig):
         temperature=config.temperature,
     )[0].tolist()
 
-    print(tokenizer.decode(output_ids))
+    print("Prompt:", config.prompt)
+    print("Output:", tokenizer.decode(output_ids))
 
 
 def parse_args():

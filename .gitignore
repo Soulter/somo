@@ -6,3 +6,5 @@ data/fineweb_sample_100k.jsonl
 data/fineweb-edu/
 data/fineweb-edu-modelscope/
 runs/
+data/samples
+datasets/

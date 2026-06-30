@@ -3,23 +3,24 @@ import math
 import random
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 import torch
 import yaml
-
 from torch.utils.tensorboard import SummaryWriter
-from .data import (
-    JsonlTokenBatcher,
-    StreamingTokenBatcher,
-    get_batch,
-    make_data,
-    read_text,
-)
-from .tokenizers.bpe import BPETokenizer
+
+from .data import TokenizedDataset, make_tokenized_dataloader
 from .model import GPT, GPTConfig
+from .tokenizers.bpe import BPETokenizer
+
+
+@dataclass
+class DatasetConfig:
+    name: str
+    tokenized_path: Path
+    weight: float = 1.0
 
 
 @dataclass
@@ -35,25 +36,24 @@ class Config:
     warmup_steps: int = 100
     seed: int = 42
     grad_clip: float = 1.0
-    data_source: str = "local"
-    data_path: Path = Path("data/tinyshakespeare.txt")
-    dataset_name: str | None = None
-    dataset_config: str | None = None
-    dataset_split: str = "train"
-    text_column: str = "text"
-    shuffle_buffer_size: int = 10_000
+    grad_accum_steps: int = 1
+    precision: str = "bf16"
+    num_workers: int = 0
+    pin_memory: bool = True
+
+    train_datasets: list[DatasetConfig] | None = None
+    eval_datasets: list[DatasetConfig] | None = None
+
     tokenizer_path: Path = Path("tokenizers/tiny-bpe.json")
-    tokenizer_vocab_size: int = 2048
-    tokenizer_train_max_documents: int = 100_000
     checkpoint_path: Path = Path("checkpoints/tiny.pt")
     resume_path: Path | None = None
+    log_dir: Path | None = None
+
     n_layers: int = 4
     n_heads: int = 4
     d_model: int = 256
     dropout: float = 0.0
-    grad_accum_steps: int = 1 # micro batch
-    log_dir: Path | None = None
-    precision: str = "bf16"
+
 
 def get_autocast_context(device: str, precision: str):
     if device == "cuda" and precision == "bf16":
@@ -61,6 +61,7 @@ def get_autocast_context(device: str, precision: str):
     if device == "cuda" and precision == "fp16":
         return torch.autocast(device_type="cuda", dtype=torch.float16)
     return nullcontext()
+
 
 def resolve_path(value: str | Path | None) -> Path | None:
     if value is None:
@@ -73,11 +74,42 @@ def resolve_path(value: str | Path | None) -> Path | None:
     return path
 
 
+def validate_dataset_config(dataset: DatasetConfig):
+    if dataset.weight <= 0:
+        raise ValueError(f"dataset weight must be positive: {dataset.name}")
+
+    if dataset.tokenized_path is None:
+        raise ValueError(f"tokenized_path is required for dataset: {dataset.name}")
+
+
+def parse_dataset_configs(values: dict, key: str) -> list[DatasetConfig]:
+    dataset_values = values.get(key)
+    if dataset_values is None:
+        return []
+
+    datasets = []
+    for item in dataset_values:
+        item = dict(item)
+        item["tokenized_path"] = resolve_path(item["tokenized_path"])
+        dataset = DatasetConfig(**item)
+        validate_dataset_config(dataset)
+        datasets.append(dataset)
+
+    return datasets
+
+
 def load_config(path: str | Path) -> Config:
     with open(path, "r", encoding="utf-8") as f:
         values = yaml.safe_load(f) or {}
 
-    values["data_path"] = resolve_path(values.get("data_path", Config.data_path))
+    train_datasets = parse_dataset_configs(values, "train_datasets")
+    eval_datasets = parse_dataset_configs(values, "eval_datasets")
+    if not train_datasets:
+        raise ValueError("train_datasets is required in the training config")
+
+    values["train_datasets"] = train_datasets
+    values["eval_datasets"] = eval_datasets or list(train_datasets)
+
     values["tokenizer_path"] = resolve_path(
         values.get("tokenizer_path", Config.tokenizer_path)
     )
@@ -86,7 +118,9 @@ def load_config(path: str | Path) -> Config:
     )
     values["resume_path"] = resolve_path(values.get("resume_path"))
 
-    log_dir = f"{str(values.get('log_dir')).rstrip('/')}/{datetime.now().strftime('%Y%m%d_%H%M%S')}" if values.get("log_dir") else None
+    log_dir = values.get("log_dir")
+    if log_dir:
+        log_dir = f"{str(log_dir).rstrip('/')}/{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     values["log_dir"] = resolve_path(log_dir)
 
     return Config(**values)
@@ -116,7 +150,7 @@ def set_seed(seed: int):
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
-# dynamic lr
+
 def get_lr(step: int, config: Config) -> float:
     if config.warmup_steps > 0 and step < config.warmup_steps:
         return config.learning_rate * (step + 1) / config.warmup_steps
@@ -178,117 +212,99 @@ def load_checkpoint(
     return step
 
 
+def build_sources(datasets: list[DatasetConfig]):
+    sources = []
+    for dataset in datasets:
+        tokenized_dataset = TokenizedDataset(dataset.tokenized_path)
+        sources.append(
+            {
+                "name": dataset.name,
+                "weight": dataset.weight,
+                "dataset": tokenized_dataset,
+            }
+        )
+    return sources
+
+
+def print_sources(title: str, sources: list[dict]):
+    print(title)
+    for source in sources:
+        dataset = source["dataset"]
+        print(
+            f"  {source['name']}: "
+            f"path={dataset.path}, "
+            f"tokens={dataset.total_tokens:,}, "
+            f"docs={dataset.total_docs:,}, "
+            f"weight={source['weight']}"
+        )
+
+
+def build_loader(
+    datasets: list[DatasetConfig],
+    config: Config,
+    device: str,
+    seed: int,
+):
+    sources = build_sources(datasets)
+    loader = make_tokenized_dataloader(
+        sources=sources,
+        batch_size=config.batch_size,
+        seq_len=config.seq_len,
+        seed=seed,
+        num_workers=config.num_workers,
+        pin_memory=(device == "cuda" and config.pin_memory),
+    )
+    return loader, sources
+
+
+def next_batch(iterator, device: str, non_blocking: bool):
+    x, y = next(iterator)
+    return (
+        x.to(device, non_blocking=non_blocking),
+        y.to(device, non_blocking=non_blocking),
+    )
+
+
 def train(config: Config):
-    # prepare data
     set_seed(config.seed)
     device = get_device()
     print(f"we will using {device}.")
-    tokenizer = BPETokenizer(config.tokenizer_path)
 
+    tokenizer = BPETokenizer(config.tokenizer_path)
     print("vocab_size:", tokenizer.vocab_size)
 
-    is_streaming = config.data_source in {"hf", "jsonl", "parquet"}
+    if not config.train_datasets:
+        raise ValueError("train_datasets is required")
+    if not config.eval_datasets:
+        raise ValueError("eval_datasets is required")
 
-    if config.data_source == "local":
-        text = read_text(config.data_path)
-        train_data, val_data = make_data(text, tokenizer)
-        train_batcher = None
-        print("train tokens:", len(train_data))
-        print("val tokens:", len(val_data))
-    elif config.data_source == "hf":
-        if config.dataset_name is None:
-            raise ValueError("dataset_name is required when data_source is 'hf'")
-        train_data = None
-        val_data = None
-        train_batcher = StreamingTokenBatcher(
-            tokenizer=tokenizer,
-            batch_size=config.batch_size,
-            seq_len=config.seq_len,
-            device=device,
-            dataset_name=config.dataset_name,
-            dataset_config=config.dataset_config,
-            dataset_split=config.dataset_split,
-            text_column=config.text_column,
-            shuffle_buffer_size=config.shuffle_buffer_size,
-            seed=config.seed,
-        )
-        eval_batcher = StreamingTokenBatcher(
-            tokenizer=tokenizer,
-            batch_size=config.batch_size,
-            seq_len=config.seq_len,
-            device=device,
-            dataset_name=config.dataset_name,
-            dataset_config=config.dataset_config,
-            dataset_split=config.dataset_split,
-            text_column=config.text_column,
-            shuffle_buffer_size=max(1, config.shuffle_buffer_size // 10),
-            seed=config.seed + 1,
-        )
-        print(
-            "hf dataset:",
-            config.dataset_name,
-            config.dataset_config,
-            config.dataset_split,
-        )
-    elif config.data_source == "jsonl":
-        train_data = None
-        val_data = None
-        train_batcher = JsonlTokenBatcher(
-            tokenizer=tokenizer,
-            batch_size=config.batch_size,
-            seq_len=config.seq_len,
-            device=device,
-            data_path=config.data_path,
-            text_column=config.text_column,
-            line_mod=10,
-            line_remainders=set(range(1, 10)),
-        )
-        eval_batcher = JsonlTokenBatcher(
-            tokenizer=tokenizer,
-            batch_size=config.batch_size,
-            seq_len=config.seq_len,
-            device=device,
-            data_path=config.data_path,
-            text_column=config.text_column,
-            line_mod=10,
-            line_remainders={0},
-        )
-        print("jsonl dataset:", config.data_path)
-    elif config.data_source == "parquet":
-        train_data = None
-        val_data = None
-        data_files = str(config.data_path)
-        train_batcher = StreamingTokenBatcher(
-            tokenizer=tokenizer,
-            batch_size=config.batch_size,
-            seq_len=config.seq_len,
-            device=device,
-            dataset_name="parquet",
-            dataset_config=None,
-            dataset_split="train",
-            text_column=config.text_column,
-            shuffle_buffer_size=config.shuffle_buffer_size,
-            seed=config.seed,
-            data_files=data_files,
-        )
-        eval_batcher = StreamingTokenBatcher(
-            tokenizer=tokenizer,
-            batch_size=config.batch_size,
-            seq_len=config.seq_len,
-            device=device,
-            dataset_name="parquet",
-            dataset_config=None,
-            dataset_split="train",
-            text_column=config.text_column,
-            shuffle_buffer_size=max(1, config.shuffle_buffer_size // 10),
-            seed=config.seed + 1,
-            data_files=data_files,
-        )
-        print("parquet dataset:", data_files)
-    else:
-        raise ValueError(f"unknown data_source: {config.data_source}")
+    train_loader, train_sources = build_loader(
+        config.train_datasets,
+        config,
+        device,
+        seed=config.seed,
+    )
+    train_eval_loader, train_eval_sources = build_loader(
+        config.train_datasets,
+        config,
+        device,
+        seed=config.seed + 10_000,
+    )
+    eval_loader, eval_sources = build_loader(
+        config.eval_datasets,
+        config,
+        device,
+        seed=config.seed + 20_000,
+    )
+    train_iter = iter(train_loader)
+    train_eval_iter = iter(train_eval_loader)
+    eval_iter = iter(eval_loader)
+    non_blocking = device == "cuda" and config.pin_memory
 
-    # prepare model
+    print_sources("train datasets:", train_sources)
+    print_sources("train eval datasets:", train_eval_sources)
+    print_sources("eval datasets:", eval_sources)
+
     gpt_config = GPTConfig(
         vocab_size=tokenizer.vocab_size,
         seq_len=config.seq_len,
@@ -314,30 +330,19 @@ def train(config: Config):
     def estimate_loss():
         model.eval()
 
-        if is_streaming:
-            losses = []
-            for _ in range(config.eval_iters):
-                x, y = eval_batcher.next_batch()
-                with get_autocast_context(device, config.precision):
-                    _, loss = model(x, y)
-                losses.append(loss.item())
-
-            mean_loss = sum(losses) / len(losses)
-            model.train()
-            return {"train": mean_loss, "val": mean_loss}
-
-        assert train_data is not None and val_data is not None
         out = {}
-        for split, data in [("train", train_data), ("val", val_data)]:
+        for split, iterator in [
+            ("train", train_eval_iter),
+            ("val", eval_iter),
+        ]:
             losses = []
             for _ in range(config.eval_iters):
-                x, y = get_batch(data, config.batch_size, config.seq_len, device)
+                x, y = next_batch(iterator, device, non_blocking)
                 with get_autocast_context(device, config.precision):
                     _, loss = model(x, y)
                 losses.append(loss.item())
 
             out[split] = sum(losses) / len(losses)
-
         model.train()
         return out
 
@@ -364,26 +369,26 @@ def train(config: Config):
             if writer is not None:
                 writer.add_scalar("loss/train", losses["train"], step)
                 writer.add_scalar("loss/val", losses["val"], step)
-                writer.add_scalar("lr", lr, step)   
+                writer.add_scalar("lr", lr, step)
 
-        optimizer.zero_grad(set_to_none=True)  # clear grad
+        optimizer.zero_grad(set_to_none=True)
 
         loss_accum = 0.0
         for micro_step in range(config.grad_accum_steps):
-            if is_streaming and train_batcher:
-                x, y = train_batcher.next_batch()
-            else:
-                assert train_data is not None
-                x, y = get_batch(train_data, config.batch_size, config.seq_len, device)
+            x, y = next_batch(train_iter, device, non_blocking)
 
             with get_autocast_context(device, config.precision):
-                logits, loss = model(x, y)
+                _, loss = model(x, y)
 
             raw_loss = loss.item()
             loss_accum += raw_loss
             if writer is not None:
                 # note: step is started from 0, so we don't need (step - 1) * config.grad_accum_steps
-                writer.add_scalar("loss/step_micro", raw_loss, step * config.grad_accum_steps + micro_step)
+                writer.add_scalar(
+                    "loss/step_micro",
+                    raw_loss,
+                    step * config.grad_accum_steps + micro_step,
+                )
             # here, finally the loss is: (grad(loss_1) + grad(loss_2) + ... + grad(loss_N)) / N
             # because pytorch accumulates the grad but not cover.
             loss = loss / config.grad_accum_steps
