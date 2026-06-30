@@ -8,6 +8,7 @@ from urllib.request import Request, urlopen
 
 import fsspec
 import pyarrow.parquet as pq
+from datasets import load_dataset
 
 
 MODELSCOPE = "https://modelscope.cn/datasets"
@@ -17,7 +18,7 @@ SOURCES = {
         "kind": "parquet",
         "urls": [
             f"{MODELSCOPE}/OpenBMB/Ultra-FineWeb/resolve/master/data/ultrafineweb_zh/ultrafineweb-zh-part-{part:03d}-of-256.parquet"
-            for part in range(1, 6)
+            for part in range(1, 12)
         ],
         "text_key": "content",
     },
@@ -31,6 +32,14 @@ SOURCES = {
         "known_counts": {
             "000_00000.jsonl": 460_860,
         },
+        "text_key": "text",
+    },
+    "nemotron_cc_math_4plus": {
+        "kind": "parquet",
+        "urls": [
+            f"{MODELSCOPE}/nv-community/Nemotron-CC-Math-v1/resolve/master/4plus/part_{part:06d}.parquet"
+            for part in range(46)
+        ],
         "text_key": "text",
     },
 }
@@ -160,11 +169,34 @@ def iter_jsonl_rows(name: str, spec: dict, skip: int):
                 yield out
 
 
+def iter_hf_rows(name: str, spec: dict, skip: int):
+    token = os.environ.get("HF_TOKEN")
+    dataset = load_dataset(
+        spec["dataset_name"],
+        spec.get("dataset_config"),
+        split=spec.get("dataset_split", "train"),
+        streaming=True,
+        token=token,
+    )
+
+    remaining_skip = skip
+    for row in dataset:
+        out = format_pretrain_row(name, row, spec["text_key"])
+        if out is None:
+            continue
+        if remaining_skip > 0:
+            remaining_skip -= 1
+            continue
+        yield out
+
+
 def iter_source_rows(name: str, spec: dict, skip: int):
     if spec["kind"] == "parquet":
         yield from iter_parquet_rows(name, spec, skip)
     elif spec["kind"] == "json":
         yield from iter_jsonl_rows(name, spec, skip)
+    elif spec["kind"] == "hf":
+        yield from iter_hf_rows(name, spec, skip)
     else:
         raise ValueError(f"unsupported source kind: {spec['kind']}")
 

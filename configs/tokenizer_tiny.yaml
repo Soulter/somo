@@ -1,0 +1,10 @@
+seed: 42
+tokenizer_path: tokenizers/tiny-bpe.json
+tokenizer_vocab_size: 2048
+tokenizer_train_max_documents: 1
+
+raw_datasets:
+  - name: tinyshakespeare
+    data_source: local
+    data_path: data/tinyshakespeare.txt
+    weight: 1.0

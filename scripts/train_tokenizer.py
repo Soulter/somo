@@ -1,14 +1,40 @@
 import argparse
 import json
+from dataclasses import dataclass
 from pathlib import Path
 
+import yaml
+from datasets import load_dataset
 from tokenizers import Tokenizer
+from tokenizers.decoders import ByteLevel as ByteLevelDecoder
 from tokenizers.models import BPE
 from tokenizers.pre_tokenizers import ByteLevel
-from tokenizers.decoders import ByteLevel as ByteLevelDecoder
 from tokenizers.trainers import BpeTrainer
-from datasets import load_dataset
-from somo.train import Config, DatasetConfig, load_config
+
+
+@dataclass
+class RawDatasetConfig:
+    name: str
+    data_source: str
+    weight: float = 1.0
+
+    data_path: Path | None = None
+    dataset_name: str | None = None
+    dataset_config: str | None = None
+    dataset_split: str = "train"
+
+    text_column: str = "text"
+    shuffle_buffer_size: int | None = None
+
+
+@dataclass
+class TokenizerConfig:
+    raw_datasets: list[RawDatasetConfig]
+    tokenizer_path: Path
+    tokenizer_vocab_size: int = 8192
+    tokenizer_train_max_documents: int = 100_000
+    shuffle_buffer_size: int = 10_000
+    seed: int = 42
 
 
 def parse_args():
@@ -17,18 +43,58 @@ def parse_args():
         "--config",
         type=Path,
         required=True,
-        help="Path to the training YAML config.",
+        help="Path to the tokenizer YAML config.",
     )
     return parser.parse_args()
 
 
-def iter_local_text(dataset: DatasetConfig):
+def resolve_path(value: str | Path | None) -> Path | None:
+    if value is None:
+        return None
+    path = Path(value)
+    if path.is_absolute():
+        return path
+    return path
+
+
+def parse_raw_datasets(values: dict) -> list[RawDatasetConfig]:
+    dataset_values = values.get("raw_datasets") or values.get("train_datasets")
+    if not dataset_values:
+        raise ValueError("raw_datasets is required in tokenizer config")
+
+    datasets = []
+    for item in dataset_values:
+        item = dict(item)
+        if item.get("data_path") is not None:
+            item["data_path"] = resolve_path(item["data_path"])
+        datasets.append(RawDatasetConfig(**item))
+    return datasets
+
+
+def load_tokenizer_config(path: Path) -> TokenizerConfig:
+    values = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    raw_datasets = parse_raw_datasets(values)
+    tokenizer_path = resolve_path(values.get("tokenizer_path"))
+    if tokenizer_path is None:
+        raise ValueError("tokenizer_path is required in tokenizer config")
+
+    return TokenizerConfig(
+        raw_datasets=raw_datasets,
+        tokenizer_path=tokenizer_path,
+        tokenizer_vocab_size=values.get("tokenizer_vocab_size", 8192),
+        tokenizer_train_max_documents=values.get("tokenizer_train_max_documents", 100_000),
+        shuffle_buffer_size=values.get("shuffle_buffer_size", 10_000),
+        seed=values.get("seed", 42),
+    )
+
+
+def iter_local_text(dataset: RawDatasetConfig):
     assert dataset.data_path is not None, "local dataset must have data_path"
     with open(dataset.data_path, "r", encoding="utf-8") as f:
         yield f.read()
 
 
-def iter_jsonl_text(dataset: DatasetConfig, max_documents: int):
+def iter_jsonl_text(dataset: RawDatasetConfig, max_documents: int):
     count = 0
     assert dataset.data_path is not None, "jsonl dataset must have data_path"
     with open(dataset.data_path, "r", encoding="utf-8") as f:
@@ -48,7 +114,7 @@ def iter_jsonl_text(dataset: DatasetConfig, max_documents: int):
 
 
 def iter_hf_text(
-    dataset_config: DatasetConfig,
+    dataset_config: RawDatasetConfig,
     max_documents: int,
     shuffle_buffer_size: int,
     seed: int,
@@ -79,7 +145,7 @@ def iter_hf_text(
 
 
 def iter_parquet_text(
-    dataset_config: DatasetConfig,
+    dataset_config: RawDatasetConfig,
     max_documents: int,
     shuffle_buffer_size: int,
     seed: int,
@@ -109,7 +175,7 @@ def iter_parquet_text(
 
 
 def iter_dataset_text(
-    dataset_config: DatasetConfig,
+    dataset_config: RawDatasetConfig,
     max_documents: int,
     shuffle_buffer_size: int,
     seed: int,
@@ -146,12 +212,11 @@ def iter_dataset_text(
     )
 
 
-def get_text_iterator(config: Config):
-    assert config.train_datasets is not None, "config must have train_datasets"
-    total_weight = sum(dataset.weight for dataset in config.train_datasets)
+def get_text_iterator(config: TokenizerConfig):
+    total_weight = sum(dataset.weight for dataset in config.raw_datasets)
     lengths = []
 
-    for dataset in config.train_datasets:
+    for dataset in config.raw_datasets:
         if dataset.data_source == "local":
             lengths.append(1)
             continue
@@ -160,8 +225,7 @@ def get_text_iterator(config: Config):
         lengths.append(max(1, length))
 
     def iterator():
-        assert config.train_datasets is not None, "config must have train_datasets"
-        for i, dataset in enumerate(config.train_datasets):
+        for i, dataset in enumerate(config.raw_datasets):
             shuffle_buffer_size = (
                 dataset.shuffle_buffer_size
                 if dataset.shuffle_buffer_size is not None
@@ -178,10 +242,9 @@ def get_text_iterator(config: Config):
 
 
 def train_tokenizer(config_path: Path):
-    config = load_config(config_path)
+    config = load_tokenizer_config(config_path)
 
-    # Byte Pair Encoding
-    tokenizer = Tokenizer(BPE(unk_token="<unk>"))  # <unk>: unknown
+    tokenizer = Tokenizer(BPE(unk_token="<unk>"))
     tokenizer.pre_tokenizer = ByteLevel(add_prefix_space=False)
     tokenizer.decoder = ByteLevelDecoder()
 
