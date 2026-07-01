@@ -1,6 +1,6 @@
 seed: 42
 shuffle_buffer_size: 10000
-tokenizer_path: tokenizers/fineweb-32k-bpe.json
+tokenizer_path: tokenizers/somo-32k-bpe.json
 tokenizer_vocab_size: 32768
 tokenizer_train_max_documents: 400000
 
@@ -9,9 +9,14 @@ raw_datasets:
     data_source: parquet
     data_path: data/fineweb-edu-modelscope/sample/10BT/train/*.parquet
     text_column: text
-    weight: 0.6
+    weight: 0.5
   - name: cci4_zh_1m
     data_source: jsonl
     data_path: data/samples/pretrain/cci4_zh_1m.jsonl
     text_column: text
     weight: 0.4
+  - name: nemotron_cc_math_4plus_5m
+    data_source: jsonl
+    data_path: data/samples/pretrain/nemotron_cc_math_4plus_5m.jsonl
+    text_column: text
+    weight: 0.1

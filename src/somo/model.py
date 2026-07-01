@@ -15,9 +15,13 @@ class GPTConfig:
     n_heads: int  # heads number
     d_model: int  # how many dimentions a token is presented
     dropout: float = 0.0
+    n_kv_heads: int | None = None # if None, then n_kv_heads = n_heads
 
     def __post_init__(self):
         assert self.d_model % self.n_heads == 0
+        if self.n_kv_heads is None:
+            self.n_kv_heads = self.n_heads
+        assert self.n_heads % self.n_kv_heads == 0
 
 
 class RMSNorm(nn.Module):
@@ -36,28 +40,48 @@ class CausalSelfAttention(nn.Module):
         super().__init__()
         self.n_heads = config.n_heads
         self.d_model = config.d_model
-        self.head_dim = (
-            config.d_model // config.n_heads
-        )  # the number of dimentions that allocate to a head
-        self.qkv_proj = nn.Linear(config.d_model, 3 * config.d_model, bias=False)
+        # the number of dimentions that allocate to a head
+        self.head_dim = config.d_model // config.n_heads
+        self.n_kv_heads = config.n_kv_heads
+        if self.n_kv_heads is None:
+            self.n_kv_heads = self.n_heads
+        self.n_rep = self.n_heads // self.n_kv_heads
+
+        # MHA
+        # self.qkv_proj = nn.Linear(config.d_model, 3 * config.d_model, bias=False)
         """
-        Same as:
+        MHA Same as:
             self.q_proj = nn.Linear(C, C)
             self.k_proj = nn.Linear(C, C)
             self.v_proj = nn.Linear(C, C)
         """
+
+        # GQA
+        self.q_proj = nn.Linear(config.d_model, self.n_heads * self.head_dim, bias=False)
+        self.k_proj = nn.Linear(config.d_model, self.n_kv_heads * self.head_dim, bias=False)
+        self.v_proj = nn.Linear(config.d_model, self.n_kv_heads * self.head_dim, bias=False)
+
         self.out_proj = nn.Linear(config.d_model, config.d_model, bias=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, T, C = x.shape  # batch, seq length, hidden size / d_model
-        qkv = self.qkv_proj(x)
-        q, k, v = qkv.chunk(3, dim=-1)
+        # qkv = self.qkv_proj(x)
+        # q, k, v = qkv.chunk(3, dim=-1)
+        q = self.q_proj(x)
+        k = self.k_proj(x)
+        v = self.v_proj(x)
 
         # multiple heads split
         # transpose: exchange the position of self.n_heads and T
+        # q = q.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
+        # k = k.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
+        # v = v.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
         q = q.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
-        k = k.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
-        v = v.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
+        k = k.view(B, T, self.n_kv_heads, self.head_dim).transpose(1, 2)
+        v = v.view(B, T, self.n_kv_heads, self.head_dim).transpose(1, 2)
+
+        k = k.repeat_interleave(self.n_rep, dim=1)
+        v = v.repeat_interleave(self.n_rep, dim=1)
 
         # apply dot product attention
         # apply this attention magic for every head.
@@ -143,6 +167,20 @@ class GPT(nn.Module):
         # the last output layer
         # [d_model] -> [vocab_size]
         self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
+
+        self.apply(self._init_weights)
+        self.lm_head.weight = self.token_emb.weight # weights tying: the same embedding matrix is used for both the input and output embeddings, which can help improve generalization and reduce the number of parameters in the model.
+
+    def _init_weights(self, module):
+        # must add this,
+        # or the loss will start from 500+,
+        # because the initial weights are too large, and the softmax will be very small, leading to a large loss.
+        if isinstance(module, nn.Linear):
+            # initialization for linear layers
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+        elif isinstance(module, nn.Embedding):
+            # initialization for embedding layers
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def forward(
         self,

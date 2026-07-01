@@ -17,24 +17,30 @@ pin_memory: true
 train_datasets:
   - name: fineweb_edu_train
     tokenized_path: datasets/fineweb_edu_10bt/train
-    weight: 0.8
-  - name: zh_mixed_pretrain_2m
-    tokenized_path: datasets/zh_mixed_pretrain_2m
-    weight: 0.2
+    weight: 0.55
+  - name: cci_zh_5m
+    tokenized_path: datasets/cci_zh_5m
+    weight: 0.25
+  - name: nemotron_cc_math_4plus_5m
+    tokenized_path: datasets/nemotron_cc_math_4plus_5m
+    weight: 0.15
+  - name: ultrafineweb_zh_5m
+    tokenized_path: datasets/ultrafineweb_zh_5m
+    weight: 0.05
 
 eval_datasets:
   - name: fineweb_edu_val
     tokenized_path: datasets/fineweb_edu_10bt/val
     weight: 1.0
 
-tokenizer_path: tokenizers/fineweb-8k-bpe.json
+tokenizer_path: tokenizers/somo-32k-bpe.json
 
 checkpoint_path: checkpoints/fineweb-mixed-100m.pt
 resume_path: null
 
-n_layers: 12
-n_heads: 12
-d_model: 768
+n_layers: 21
+n_heads: 16
+d_model: 1024
 dropout: 0.0
 
-log_dir: runs/fineweb_mixed_100m
+log_dir: runs/fineweb_mixed_300m
