@@ -11,7 +11,7 @@ import torch
 import yaml
 from torch.utils.tensorboard import SummaryWriter
 
-from .data import TokenizedDataset, make_tokenized_dataloader
+from .data import SFTTokenizedDataset, TokenizedDataset, make_tokenized_dataloader
 from .model import GPT, GPTConfig
 from .tokenizers.bpe import BPETokenizer
 
@@ -53,6 +53,9 @@ class Config:
     n_heads: int = 4
     d_model: int = 256
     dropout: float = 0.0
+    n_kv_heads: int | None = None  # if None, then n_kv_heads = n_heads
+
+    train_mode: str = "pretrain"  # "sft" or "pretrain"
 
 
 def get_autocast_context(device: str, precision: str):
@@ -212,10 +215,18 @@ def load_checkpoint(
     return step
 
 
-def build_sources(datasets: list[DatasetConfig]):
+def dataset_class_for_mode(train_mode: str):
+    if train_mode == "pretrain":
+        return TokenizedDataset
+    if train_mode == "sft":
+        return SFTTokenizedDataset
+    raise ValueError(f"unknown train_mode: {train_mode}")
+
+
+def build_sources(datasets: list[DatasetConfig], dataset_cls):
     sources = []
     for dataset in datasets:
-        tokenized_dataset = TokenizedDataset(dataset.tokenized_path)
+        tokenized_dataset = dataset_cls(dataset.tokenized_path)
         sources.append(
             {
                 "name": dataset.name,
@@ -245,7 +256,8 @@ def build_loader(
     device: str,
     seed: int,
 ):
-    sources = build_sources(datasets)
+    dataset_cls = dataset_class_for_mode(config.train_mode)
+    sources = build_sources(datasets, dataset_cls)
     loader = make_tokenized_dataloader(
         sources=sources,
         batch_size=config.batch_size,
@@ -269,6 +281,7 @@ def train(config: Config):
     set_seed(config.seed)
     device = get_device()
     print(f"we will using {device}.")
+    print(f"train_mode: {config.train_mode}")
 
     tokenizer = BPETokenizer(config.tokenizer_path)
     print("vocab_size:", tokenizer.vocab_size)
@@ -312,6 +325,7 @@ def train(config: Config):
         n_heads=config.n_heads,
         d_model=config.d_model,
         dropout=config.dropout,
+        n_kv_heads=config.n_kv_heads,
     )
     model = GPT(gpt_config).to(device)
     num_params = sum(p.numel() for p in model.parameters())

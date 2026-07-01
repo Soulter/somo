@@ -1,0 +1,39 @@
+batch_size: 16
+seq_len: 1024
+max_steps: 76294
+eval_interval: 100
+eval_iters: 5
+checkpoint_interval: 500
+learning_rate: 0.0003
+min_lr: 0.00003
+warmup_steps: 100
+seed: 42
+grad_clip: 1.0
+grad_accum_steps: 32
+precision: bf16
+num_workers: 0
+pin_memory: true
+
+train_mode: sft
+
+train_datasets:
+  - name: sft_mixed
+    tokenized_path: datasets/sft_mixed
+    weight: 1.0
+
+eval_datasets:
+  - name: sft_mixed
+    tokenized_path: datasets/sft_mixed
+    weight: 1.0
+
+tokenizer_path: tokenizers/fineweb-8k-bpe.json
+
+checkpoint_path: checkpoints/sft-fineweb-10bt-100m.pt
+resume_path: checkpoints/fineweb-10bt-100m.pt
+
+n_layers: 12
+n_heads: 12
+d_model: 768
+dropout: 0.0
+
+log_dir: runs/sft_fineweb_10bt_100m

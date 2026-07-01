@@ -258,6 +258,7 @@ def main():
     parser.add_argument("--output-dir", type=Path, default=Path("data/samples"))
     parser.add_argument("--target", type=parse_count, default=parse_count("1m"))
     parser.add_argument("--sources", nargs="+", default=["ultrafineweb_zh", "cci4_zh"])
+    parser.add_argument("--no-mix", action="store_true", help="Do not rebuild mixed_pretrain_sample.jsonl.")
     args = parser.parse_args()
 
     source_paths = []
@@ -273,11 +274,12 @@ def main():
             "target": args.target,
         }
 
-    mixed_path, mixed_rows = rebuild_mixed_pretrain(args.output_dir, source_paths)
-    pretrain_summary["mixed_pretrain"] = {
-        "path": str(mixed_path),
-        "rows": mixed_rows,
-    }
+    if not args.no_mix:
+        mixed_path, mixed_rows = rebuild_mixed_pretrain(args.output_dir, source_paths)
+        pretrain_summary["mixed_pretrain"] = {
+            "path": str(mixed_path),
+            "rows": mixed_rows,
+        }
     update_summary(args.output_dir, pretrain_summary)
     sys.stdout.flush()
     sys.stderr.flush()
