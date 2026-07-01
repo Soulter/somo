@@ -4,8 +4,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .util import my_functional as MyF
-
 
 @dataclass
 class GPTConfig:
@@ -45,7 +43,6 @@ class CausalSelfAttention(nn.Module):
         self.n_kv_heads = config.n_kv_heads
         if self.n_kv_heads is None:
             self.n_kv_heads = self.n_heads
-        self.n_rep = self.n_heads // self.n_kv_heads
 
         # MHA
         # self.qkv_proj = nn.Linear(config.d_model, 3 * config.d_model, bias=False)
@@ -80,9 +77,6 @@ class CausalSelfAttention(nn.Module):
         k = k.view(B, T, self.n_kv_heads, self.head_dim).transpose(1, 2)
         v = v.view(B, T, self.n_kv_heads, self.head_dim).transpose(1, 2)
 
-        k = k.repeat_interleave(self.n_rep, dim=1)
-        v = v.repeat_interleave(self.n_rep, dim=1)
-
         # apply dot product attention
         # apply this attention magic for every head.
         y = F.scaled_dot_product_attention(
@@ -92,6 +86,7 @@ class CausalSelfAttention(nn.Module):
             attn_mask=None,
             dropout_p=0.0,
             is_causal=True,
+            enable_gqa=self.n_kv_heads != self.n_heads,
         )
 
         #

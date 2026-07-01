@@ -35,8 +35,8 @@ eval_datasets:
 
 tokenizer_path: tokenizers/somo-32k-bpe.json
 
-checkpoint_path: checkpoints/fineweb-mixed-100m-gqa.pt
-resume_path: null
+checkpoint_path: checkpoints/fineweb-mixed-300m-gqa.pt
+resume_path: checkpoints/fineweb-mixed-300m-gqa.pt
 
 n_layers: 24
 n_heads: 16
