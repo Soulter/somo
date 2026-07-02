@@ -89,6 +89,9 @@ class CausalSelfAttention(nn.Module):
         self.register_buffer("rope_cos", rope_cos, persistent=False)
         self.register_buffer("rope_sin", rope_sin, persistent=False)
 
+        self.q_norm = RMSNorm(self.head_dim)
+        self.k_norm = RMSNorm(self.head_dim)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, T, C = x.shape  # batch, seq length, hidden size / d_model
         # qkv = self.qkv_proj(x)
@@ -106,8 +109,12 @@ class CausalSelfAttention(nn.Module):
         k = k.view(B, T, self.n_kv_heads, self.head_dim).transpose(1, 2)
         v = v.view(B, T, self.n_kv_heads, self.head_dim).transpose(1, 2)
 
-        q = apply_rope(q, self.rope_cos, self.rope_sin)
-        k = apply_rope(k, self.rope_cos, self.rope_sin)
+        # normalize q and k before applying RoPE
+        q = self.q_norm(q)
+        k = self.k_norm(k)
+
+        q = apply_rope(q, self.rope_cos, self.rope_sin) # type: ignore
+        k = apply_rope(k, self.rope_cos, self.rope_sin) # type: ignore
 
         # apply dot product attention
         # apply this attention magic for every head.
