@@ -16,6 +16,7 @@ class GPTConfig:
     n_kv_heads: int | None = None # if None, then n_kv_heads = n_heads
 
     qk_norm: bool = False # whether to normalize q and k before applying RoPE
+    swiglu: bool = False # whether to use swiglu instead of gelu in MLP
 
     def __post_init__(self):
         assert self.d_model % self.n_heads == 0
@@ -150,25 +151,41 @@ class CausalSelfAttention(nn.Module):
 class MLP(nn.Module):
     def __init__(self, config: GPTConfig):
         super().__init__()
-        # why 4? because in the original transformer paper,
-        # the hidden dimension of the feedforward network is 4 times the model dimension.
-        # This is a common practice in transformer architectures to allow for
-        # more expressive power in the feedforward layers.
-        hidden_dim = 4 * config.d_model
-        self.fc1 = nn.Linear(config.d_model, hidden_dim, bias=False)
-        self.fc2 = nn.Linear(hidden_dim, config.d_model, bias=False)
+
+        if config.swiglu:
+            hidden_dim = self._round_up(int(8 * config.d_model / 3), 256)
+            self.gate_proj = nn.Linear(config.d_model, hidden_dim, bias=False)
+            self.up_proj = nn.Linear(config.d_model, hidden_dim, bias=False)
+            self.down_proj = nn.Linear(hidden_dim, config.d_model, bias=False)
+        else:
+            # why 4? because in the original transformer paper,
+            # the hidden dimension of the feedforward network is 4 times the model dimension.
+            # This is a common practice in transformer architectures to allow for
+            # more expressive power in the feedforward layers.
+            hidden_dim = 4 * config.d_model
+            self.fc1 = nn.Linear(config.d_model, hidden_dim, bias=False)
+            self.fc2 = nn.Linear(hidden_dim, config.d_model, bias=False)
+    
+    def _round_up(self, x: int, multiple: int) -> int:
+        return ((x + multiple - 1) // multiple) * multiple
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.fc1(x)
-        # gelu?
-        # GELU (Gaussian Error Linear Unit) is an activation function that is used in neural networks,
-        # particularly in transformer architectures. It is defined as:
-        # GELU(x) = x * Φ(x)
-        # where Φ(x) is the cumulative distribution function of the standard normal distribution.
-        x = F.gelu(x)
-        x = self.fc2(x)
-        return x
-
+        if hasattr(self, "gate_proj") and hasattr(self, "up_proj") and hasattr(self, "down_proj"):
+            gate = self.gate_proj(x)
+            up = self.up_proj(x)
+            x = F.silu(gate) * up
+            x = self.down_proj(x)
+            return x
+        else:
+            x = self.fc1(x)
+            # gelu?
+            # GELU (Gaussian Error Linear Unit) is an activation function that is used in neural networks,
+            # particularly in transformer architectures. It is defined as:
+            # GELU(x) = x * Φ(x)
+            # where Φ(x) is the cumulative distribution function of the standard normal distribution.
+            x = F.gelu(x)
+            x = self.fc2(x)
+            return x
 
 class TransformerBlock(nn.Module):
     def __init__(self, config: GPTConfig):

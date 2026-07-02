@@ -55,6 +55,7 @@ class Config:
     dropout: float = 0.0
     n_kv_heads: int | None = None  # if None, then n_kv_heads = n_heads
     qk_norm: bool = False  # whether to normalize q and k before applying RoPE
+    swiglu: bool = False  # whether to use SwiGLU instead of GELU
 
     train_mode: str = "pretrain"  # "sft" or "pretrain"
 
@@ -327,7 +328,8 @@ def train(config: Config):
         d_model=config.d_model,
         dropout=config.dropout,
         n_kv_heads=config.n_kv_heads,
-        qk_norm=config.qk_norm
+        qk_norm=config.qk_norm,
+        swiglu=config.swiglu,
     )
     model = GPT(gpt_config).to(device)
     num_params = sum(p.numel() for p in model.parameters())
