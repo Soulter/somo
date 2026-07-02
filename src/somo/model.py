@@ -33,6 +33,32 @@ class RMSNorm(nn.Module):
         return self.weight * x_norm
 
 
+def build_rope_cache(seq_len: int, head_dim: int, theta: float = 10000.0):
+    if head_dim % 2 != 0:
+        raise ValueError(f"RoPE requires even head_dim, got {head_dim}")
+
+    inv_freq = 1.0 / (
+        theta ** (torch.arange(0, head_dim, 2, dtype=torch.float32) / head_dim)
+    )
+    positions = torch.arange(seq_len, dtype=torch.float32)
+    freqs = torch.outer(positions, inv_freq)
+    return freqs.cos()[None, None, :, :], freqs.sin()[None, None, :, :]
+
+
+def apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor):
+    # x: [B, H, T, D]. RoPE rotates each even/odd pair in the head dimension.
+    T = x.size(-2)
+    x_even = x[..., 0::2]
+    x_odd = x[..., 1::2]
+    cos = cos[:, :, :T, :].to(dtype=x.dtype)
+    sin = sin[:, :, :T, :].to(dtype=x.dtype)
+
+    out = torch.empty_like(x)
+    out[..., 0::2] = x_even * cos - x_odd * sin
+    out[..., 1::2] = x_even * sin + x_odd * cos
+    return out
+
+
 class CausalSelfAttention(nn.Module):
     def __init__(self, config: GPTConfig):
         super().__init__()
@@ -59,6 +85,9 @@ class CausalSelfAttention(nn.Module):
         self.v_proj = nn.Linear(config.d_model, self.n_kv_heads * self.head_dim, bias=False)
 
         self.out_proj = nn.Linear(config.d_model, config.d_model, bias=False)
+        rope_cos, rope_sin = build_rope_cache(config.seq_len, self.head_dim)
+        self.register_buffer("rope_cos", rope_cos, persistent=False)
+        self.register_buffer("rope_sin", rope_sin, persistent=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, T, C = x.shape  # batch, seq length, hidden size / d_model
@@ -76,6 +105,9 @@ class CausalSelfAttention(nn.Module):
         q = q.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
         k = k.view(B, T, self.n_kv_heads, self.head_dim).transpose(1, 2)
         v = v.view(B, T, self.n_kv_heads, self.head_dim).transpose(1, 2)
+
+        q = apply_rope(q, self.rope_cos, self.rope_sin)
+        k = apply_rope(k, self.rope_cos, self.rope_sin)
 
         # apply dot product attention
         # apply this attention magic for every head.
@@ -151,8 +183,6 @@ class GPT(nn.Module):
 
         # learnable vocab
         self.token_emb = nn.Embedding(config.vocab_size, config.d_model)  # B, T, C
-        # position embedding
-        self.pos_emb = nn.Embedding(config.seq_len, config.d_model)  # T, C
 
         self.blocks = nn.ModuleList(
             [TransformerBlock(config) for _ in range(config.n_layers)]
@@ -187,10 +217,7 @@ class GPT(nn.Module):
             "Cannot forward, model block size is exhausted."
         )
 
-        pos = torch.arange(0, T, device=idx.device)
-        tok = self.token_emb(idx)  # b,t,c
-        pos = self.pos_emb(pos)  # t,c
-        x = tok + pos  # broadcast
+        x = self.token_emb(idx)  # b,t,c
 
         for block in self.blocks:
             x = block(x)
